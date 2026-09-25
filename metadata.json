@@ -1,0 +1,6 @@
+{
+  "name": "TalentFlow - Online Application & Verification Portal",
+  "description": "Online job application portal with resume upload, automated & manual document verification, and a real-time recruiter tracking dashboard powered by PostgreSQL and Node.js.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
