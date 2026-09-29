@@ -220,10 +220,50 @@ export const api = {
     );
   },
 
+  updateApplication: async (id: string, data: Partial<Application>): Promise<Application> => {
+    return executeWithFallback(
+      () => safeApiRequest<Application>(`/applications/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+      () => localStore.updateApplication(id, data)
+    );
+  },
+
   deleteApplication: async (id: string): Promise<{ message: string }> => {
     return executeWithFallback(
       () => safeApiRequest<{ message: string }>(`/applications/${id}`, { method: 'DELETE' }),
       () => localStore.deleteApplication(id)
+    );
+  },
+
+  // Document Registry Management
+  getAllDocuments: async (params?: { status?: string; search?: string }): Promise<any[]> => {
+    const q = new URLSearchParams();
+    if (params?.status) q.append('status', params.status);
+    if (params?.search) q.append('search', params.search);
+    const endpoint = `/documents?${q.toString()}`;
+
+    return executeWithFallback(
+      () => safeApiRequest<any[]>(endpoint),
+      () => localStore.getDocuments(params)
+    );
+  },
+
+  updateDocument: async (id: string, data: any): Promise<any> => {
+    return executeWithFallback(
+      () => safeApiRequest<any>(`/documents/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+      () => localStore.updateDocument(id, data)
+    );
+  },
+
+  deleteDocument: async (id: string): Promise<{ message: string }> => {
+    return executeWithFallback(
+      () => safeApiRequest<{ message: string }>(`/documents/${id}`, { method: 'DELETE' }),
+      () => localStore.deleteDocument(id)
     );
   },
 

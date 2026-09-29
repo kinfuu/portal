@@ -1336,6 +1336,186 @@ app.delete('/api/applications/:id', authenticateToken, async (req: Authenticated
   }
 });
 
+// PATCH /api/applications/:id (System Admin & HR full edit of any application fields)
+const handleUpdateFullApplication = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!isAdminOrHrAdmin(req.user?.role)) {
+      return res.status(403).json({ error: 'Permission denied: Administrator role required' });
+    }
+
+    const { id } = req.params;
+    const {
+      applicantName,
+      applicantEmail,
+      applicantPhone,
+      department,
+      status,
+      verificationStatus,
+      verificationScore,
+      recruiterNotes,
+      recruiterRating,
+      rejectionReason,
+      coverLetter,
+      portfolioUrl,
+      linkedinUrl,
+    } = req.body;
+
+    const existing = await pool.query('SELECT * FROM applications WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Application not found' });
+    }
+    const current = existing.rows[0];
+
+    const result = await pool.query(
+      `UPDATE applications
+       SET applicant_name = COALESCE($1, applicant_name),
+           applicant_email = COALESCE($2, applicant_email),
+           applicant_phone = COALESCE($3, applicant_phone),
+           department = COALESCE($4, department),
+           status = COALESCE($5, status),
+           verification_status = COALESCE($6, verification_status),
+           verification_score = COALESCE($7, verification_score),
+           recruiter_notes = COALESCE($8, recruiter_notes),
+           recruiter_rating = COALESCE($9, recruiter_rating),
+           rejection_reason = COALESCE($10, rejection_reason),
+           cover_letter = COALESCE($11, cover_letter),
+           portfolio_url = COALESCE($12, portfolio_url),
+           linkedin_url = COALESCE($13, linkedin_url),
+           updated_at = NOW()
+       WHERE id = $14
+       RETURNING *`,
+      [
+        applicantName !== undefined ? applicantName.trim() : null,
+        applicantEmail !== undefined ? applicantEmail.trim() : null,
+        applicantPhone !== undefined ? applicantPhone.trim() : null,
+        department !== undefined ? department.trim() : null,
+        status !== undefined ? status : null,
+        verificationStatus !== undefined ? verificationStatus : null,
+        verificationScore !== undefined ? Number(verificationScore) : null,
+        recruiterNotes !== undefined ? recruiterNotes : null,
+        recruiterRating !== undefined ? Number(recruiterRating) : null,
+        rejectionReason !== undefined ? rejectionReason : null,
+        coverLetter !== undefined ? coverLetter : null,
+        portfolioUrl !== undefined ? portfolioUrl : null,
+        linkedinUrl !== undefined ? linkedinUrl : null,
+        id,
+      ]
+    );
+
+    // Record timeline entry if status changed
+    if (status && status !== current.status) {
+      await pool.query(
+        `INSERT INTO application_timeline (application_id, status, actor_name, comment)
+         VALUES ($1, $2, $3, $4)`,
+        [id, status, req.user?.fullName || 'System Administrator', `System admin updated stage to ${status}`]
+      );
+    }
+
+    res.json(result.rows[0]);
+  } catch (error: any) {
+    console.error('Error updating full application:', error);
+    res.status(500).json({ error: error.message || 'Failed to update application' });
+  }
+};
+
+app.put('/api/applications/:id', authenticateToken, handleUpdateFullApplication);
+app.patch('/api/applications/:id', authenticateToken, handleUpdateFullApplication);
+
+// GET /api/documents (List all documents in database for System Admin)
+app.get('/api/documents', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!isStaff(req.user?.role)) {
+      return res.status(403).json({ error: 'Permission denied: Staff access required' });
+    }
+
+    const { status, search } = req.query;
+    let query = `
+      SELECT d.*, a.applicant_name, a.applicant_email, v.title as vacancy_title
+      FROM documents d
+      JOIN applications a ON d.application_id = a.id
+      JOIN vacancies v ON a.vacancy_id = v.id
+    `;
+    const conditions: string[] = [];
+    const values: any[] = [];
+
+    if (status && status !== 'All') {
+      values.push(status);
+      conditions.push(`d.status = $${values.length}`);
+    }
+
+    if (search) {
+      values.push(`%${search}%`);
+      conditions.push(`(d.file_name ILIKE $${values.length} OR a.applicant_name ILIKE $${values.length} OR v.title ILIKE $${values.length})`);
+    }
+
+    if (conditions.length > 0) {
+      query += ` WHERE ` + conditions.join(' AND ');
+    }
+
+    query += ` ORDER BY d.created_at DESC`;
+
+    const result = await pool.query(query, values);
+    res.json(result.rows);
+  } catch (error: any) {
+    console.error('Error listing documents:', error);
+    res.status(500).json({ error: 'Failed to retrieve documents' });
+  }
+});
+
+// PATCH /api/documents/:id (System Admin update document)
+app.patch('/api/documents/:id', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!isAdminOrHrAdmin(req.user?.role)) {
+      return res.status(403).json({ error: 'Permission denied: Admin access required' });
+    }
+
+    const { id } = req.params;
+    const { status, verificationComment, documentType, automatedCheckStatus } = req.body;
+
+    const result = await pool.query(
+      `UPDATE documents
+       SET status = COALESCE($1, status),
+           verification_comment = COALESCE($2, verification_comment),
+           document_type = COALESCE($3, document_type),
+           automated_check_status = COALESCE($4, automated_check_status),
+           verified_by = $5,
+           verified_at = NOW()
+       WHERE id = $6
+       RETURNING *`,
+      [status, verificationComment, documentType, automatedCheckStatus, req.user?.id, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error: any) {
+    console.error('Error updating document:', error);
+    res.status(500).json({ error: 'Failed to update document' });
+  }
+});
+
+// DELETE /api/documents/:id (System Admin delete document)
+app.delete('/api/documents/:id', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!isAdminOrHrAdmin(req.user?.role)) {
+      return res.status(403).json({ error: 'Permission denied: Admin access required' });
+    }
+
+    const { id } = req.params;
+    const result = await pool.query('DELETE FROM documents WHERE id = $1 RETURNING id', [id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    res.json({ message: 'Document deleted successfully' });
+  } catch (error: any) {
+    console.error('Error deleting document:', error);
+    res.status(500).json({ error: 'Failed to delete document' });
+  }
+});
+
 // -------------------------------------------------------------
 // DOCUMENT VERIFICATION ENGINE (Automated & Recruiter Verification)
 // -------------------------------------------------------------

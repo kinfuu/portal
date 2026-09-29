@@ -694,6 +694,35 @@ export const localStore = {
     return apps[idx];
   },
 
+  updateApplication: async (id: string, data: Partial<Application>, actorName: string = 'System Administrator'): Promise<Application> => {
+    const apps = readApplications();
+    const idx = apps.findIndex((a) => a.id === id);
+    if (idx === -1) throw new Error('Application not found');
+
+    const prev = apps[idx];
+    apps[idx] = {
+      ...prev,
+      ...data,
+      updatedAt: new Date().toISOString(),
+    };
+    saveApplications(apps);
+
+    if (data.status && data.status !== prev.status) {
+      const timeline = readTimeline();
+      timeline.unshift({
+        id: `time-${Date.now()}`,
+        applicationId: id,
+        status: data.status,
+        actorName: actorName,
+        comment: `System Administrator updated application status to ${data.status}`,
+        createdAt: new Date().toISOString(),
+      });
+      saveTimeline(timeline);
+    }
+
+    return apps[idx];
+  },
+
   deleteApplication: async (id: string): Promise<{ message: string }> => {
     const apps = readApplications();
     saveApplications(apps.filter((a) => a.id !== id));
@@ -702,6 +731,60 @@ export const localStore = {
     const timeline = readTimeline();
     saveTimeline(timeline.filter((t) => t.applicationId !== id));
     return { message: 'Application deleted successfully' };
+  },
+
+  // Document Registry Management
+  getDocuments: async (params?: { status?: string; search?: string }): Promise<any[]> => {
+    let docs = readDocuments();
+    const apps = readApplications();
+    const vacs = readVacancies();
+
+    let enriched = docs.map((d) => {
+      const app = apps.find((a) => a.id === d.applicationId);
+      const vac = app ? vacs.find((v) => v.id === app.vacancyId) : null;
+      return {
+        ...d,
+        applicant_name: app ? app.applicantName : 'Unknown Applicant',
+        applicant_email: app ? app.applicantEmail : 'N/A',
+        vacancy_title: vac ? vac.title : app?.vacancyTitle || 'Position',
+      };
+    });
+
+    if (params?.status && params.status !== 'All') {
+      enriched = enriched.filter((d) => d.status === params.status);
+    }
+
+    if (params?.search) {
+      const s = params.search.toLowerCase();
+      enriched = enriched.filter(
+        (d) =>
+          d.fileName.toLowerCase().includes(s) ||
+          d.applicant_name.toLowerCase().includes(s) ||
+          d.vacancy_title.toLowerCase().includes(s)
+      );
+    }
+
+    return enriched;
+  },
+
+  updateDocument: async (id: string, data: Partial<ApplicationDocument>): Promise<ApplicationDocument> => {
+    const docs = readDocuments();
+    const idx = docs.findIndex((d) => d.id === id);
+    if (idx === -1) throw new Error('Document not found');
+
+    docs[idx] = {
+      ...docs[idx],
+      ...data,
+      verifiedAt: data.status ? new Date().toISOString() : docs[idx].verifiedAt,
+    };
+    saveDocuments(docs);
+    return docs[idx];
+  },
+
+  deleteDocument: async (id: string): Promise<{ message: string }> => {
+    const docs = readDocuments();
+    saveDocuments(docs.filter((d) => d.id !== id));
+    return { message: 'Document deleted successfully' };
   },
 
   // Document Verification
