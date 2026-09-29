@@ -105,7 +105,21 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
   const [showCreateStaffModal, setShowCreateStaffModal] = useState(false);
   const [showCreateVacancyModal, setShowCreateVacancyModal] = useState(false);
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
-  const [editingUserRole, setEditingUserRole] = useState<{ id: string; role: string } | null>(null);
+
+  // Edit User modal state
+  const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [editUserName, setEditUserName] = useState('');
+  const [editUserEmail, setEditUserEmail] = useState('');
+  const [editUserRole, setEditUserRole] = useState('applicant');
+  const [editUserLoading, setEditUserLoading] = useState(false);
+
+  // In-app Confirmation Dialog state (replaces window.confirm)
+  const [confirmModal, setConfirmModal] = useState<{
+    title: string;
+    message: string;
+    confirmLabel?: string;
+    onConfirm: () => Promise<void> | void;
+  } | null>(null);
 
   // User Password Reset modal state
   const [resettingUser, setResettingUser] = useState<User | null>(null);
@@ -181,28 +195,50 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
     }
   };
 
-  const handleUpdateRole = async (userId: string, newRole: string) => {
+  const handleStartEditUser = (u: User) => {
+    setEditingUser(u);
+    setEditUserName(u.fullName);
+    setEditUserEmail(u.email);
+    setEditUserRole(u.role);
+  };
+
+  const handleSaveEditUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUser) return;
+    setEditUserLoading(true);
     try {
-      await api.updateUserRole(userId, newRole);
-      setEditingUserRole(null);
-      setStatusMessage({ text: 'User role updated successfully', type: 'success' });
+      await api.updateUser(editingUser.id, {
+        fullName: editUserName,
+        email: editUserEmail,
+        role: editUserRole,
+      });
+      setStatusMessage({ text: `User "${editUserName}" updated successfully!`, type: 'success' });
+      setEditingUser(null);
       loadData();
     } catch (err: any) {
-      setStatusMessage({ text: err.message || 'Failed to update user role', type: 'error' });
+      setStatusMessage({ text: err.message || 'Failed to update user', type: 'error' });
+    } finally {
+      setEditUserLoading(false);
     }
   };
 
-  const handleDeleteUser = async (user: User) => {
-    if (!window.confirm(`Are you sure you want to permanently delete user "${user.fullName}" (${user.email})?`)) {
-      return;
-    }
-    try {
-      await api.deleteUser(user.id);
-      setStatusMessage({ text: `User "${user.fullName}" removed from system.`, type: 'success' });
-      loadData();
-    } catch (err: any) {
-      setStatusMessage({ text: err.message || 'Failed to delete user', type: 'error' });
-    }
+  const handleDeleteUser = (user: User) => {
+    setConfirmModal({
+      title: 'Delete User Account',
+      message: `Are you sure you want to permanently delete user "${user.fullName}" (${user.email})? This action cannot be undone.`,
+      confirmLabel: 'Yes, Delete User',
+      onConfirm: async () => {
+        try {
+          await api.deleteUser(user.id);
+          setStatusMessage({ text: `User "${user.fullName}" removed from system.`, type: 'success' });
+          loadData();
+        } catch (err: any) {
+          setStatusMessage({ text: err.message || 'Failed to delete user', type: 'error' });
+        } finally {
+          setConfirmModal(null);
+        }
+      }
+    });
   };
 
   const handleToggleVacancyStatus = async (vac: Vacancy) => {
@@ -236,16 +272,16 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
     setEditVacLoading(true);
     try {
       await api.updateVacancy(editingVacancy.id, {
-        title: editTitle,
+        title: editTitle.trim(),
         department: editDept,
-        location: editLocation,
+        location: editLocation.trim(),
         type: editType,
         experienceLevel: editExpLevel,
-        salaryRange: editSalary,
+        salaryRange: editSalary ? editSalary.trim() : undefined,
         deadline: editDeadline ? new Date(editDeadline).toISOString() : undefined,
         status: editStatus,
-        description: editDescription,
-        requirements: editRequirements,
+        description: editDescription.trim(),
+        requirements: editRequirements.trim(),
       });
       setStatusMessage({ text: `Vacancy "${editTitle}" updated successfully!`, type: 'success' });
       setEditingVacancy(null);
@@ -257,29 +293,71 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
     }
   };
 
-  const handleDeleteVacancy = async (vac: Vacancy) => {
-    if (!window.confirm(`Are you sure you want to permanently delete vacancy "${vac.title}" and its applications?`)) {
-      return;
-    }
+  const handleDeleteVacancy = (vac: Vacancy) => {
+    setConfirmModal({
+      title: 'Delete Vacancy',
+      message: `Are you sure you want to permanently delete vacancy "${vac.title}"? All submitted candidate applications for this position will also be removed.`,
+      confirmLabel: 'Yes, Delete Vacancy',
+      onConfirm: async () => {
+        try {
+          await api.deleteVacancy(vac.id);
+          setStatusMessage({ text: `Vacancy "${vac.title}" deleted.`, type: 'success' });
+          loadData();
+        } catch (err: any) {
+          setStatusMessage({ text: err.message || 'Failed to delete vacancy', type: 'error' });
+        } finally {
+          setConfirmModal(null);
+        }
+      }
+    });
+  };
+
+  const handleDeleteApplication = (app: Application) => {
+    setConfirmModal({
+      title: 'Delete Candidate Application',
+      message: `Are you sure you want to delete application from ${app.applicantName}?`,
+      confirmLabel: 'Yes, Delete Application',
+      onConfirm: async () => {
+        try {
+          await api.deleteApplication(app.id);
+          setStatusMessage({ text: 'Application deleted successfully.', type: 'success' });
+          loadData();
+        } catch (err: any) {
+          setStatusMessage({ text: err.message || 'Failed to delete application', type: 'error' });
+        } finally {
+          setConfirmModal(null);
+        }
+      }
+    });
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resettingUser) return;
+    setResetLoading(true);
     try {
-      await api.deleteVacancy(vac.id);
-      setStatusMessage({ text: `Vacancy "${vac.title}" deleted.`, type: 'success' });
+      await api.resetUserPassword(resettingUser.id, newPasswordVal);
+      setStatusMessage({ text: `Password for "${resettingUser.fullName}" updated successfully!`, type: 'success' });
+      setResettingUser(null);
+      setNewPasswordVal('');
       loadData();
     } catch (err: any) {
-      setStatusMessage({ text: err.message || 'Failed to delete vacancy', type: 'error' });
+      setStatusMessage({ text: err.message || 'Failed to reset password', type: 'error' });
+    } finally {
+      setResetLoading(false);
     }
   };
 
-  const handleDeleteApplication = async (app: Application) => {
-    if (!window.confirm(`Are you sure you want to delete application from ${app.applicantName}?`)) {
-      return;
-    }
+  const handleSyncHealth = async () => {
+    setSyncLoading(true);
     try {
-      await api.deleteApplication(app.id);
-      setStatusMessage({ text: 'Application deleted successfully.', type: 'success' });
+      const res = await api.syncSystemHealth();
+      setStatusMessage({ text: res.message, type: 'success' });
       loadData();
     } catch (err: any) {
-      setStatusMessage({ text: err.message || 'Failed to delete application', type: 'error' });
+      setStatusMessage({ text: err.message || 'Database synchronization failed', type: 'error' });
+    } finally {
+      setSyncLoading(false);
     }
   };
 
@@ -478,40 +556,21 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                     </td>
                     <td className="px-4 py-3.5 text-slate-600 font-mono text-[11px]">{u.email}</td>
                     <td className="px-4 py-3.5">
-                      {editingUserRole?.id === u.id ? (
-                        <div className="flex items-center gap-2">
-                          <select
-                            defaultValue={u.role}
-                            onChange={(e) => handleUpdateRole(u.id, e.target.value)}
-                            className="rounded-lg border border-purple-400 bg-white p-1 text-xs"
-                          >
-                            <option value="system_admin">system_admin</option>
-                            <option value="hr_admin">hr_admin</option>
-                            <option value="hr_employee">hr_employee</option>
-                            <option value="applicant">applicant</option>
-                          </select>
-                          <button
-                            onClick={() => setEditingUserRole(null)}
-                            className="text-xs text-slate-400 hover:text-slate-600"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <span
-                          className={`inline-flex rounded-lg px-2.5 py-1 text-[11px] font-bold capitalize ${
-                            u.role === 'system_admin'
-                              ? 'bg-purple-100 text-purple-800 border border-purple-200'
-                              : u.role === 'hr_admin'
-                              ? 'bg-blue-100 text-blue-800 border border-blue-200'
-                              : u.role === 'hr_employee'
-                              ? 'bg-teal-100 text-teal-800 border border-teal-200'
-                              : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                          }`}
-                        >
-                          {u.role.replace('_', ' ')}
-                        </span>
-                      )}
+                      <span
+                        onClick={() => handleStartEditUser(u)}
+                        className={`inline-flex items-center gap-1 cursor-pointer rounded-lg px-2.5 py-1 text-[11px] font-bold capitalize transition hover:ring-2 hover:ring-purple-300 ${
+                          u.role === 'system_admin'
+                            ? 'bg-purple-100 text-purple-800 border border-purple-200'
+                            : u.role === 'hr_admin'
+                            ? 'bg-blue-100 text-blue-800 border border-blue-200'
+                            : u.role === 'hr_employee'
+                            ? 'bg-teal-100 text-teal-800 border border-teal-200'
+                            : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                        }`}
+                        title="Click to edit user role & details"
+                      >
+                        {u.role.replace('_', ' ')}
+                      </span>
                     </td>
                     <td className="px-4 py-3.5 text-slate-600">
                       {u.role === 'applicant' ? `${u.applicationCount || 0} applied` : 'Staff'}
@@ -522,19 +581,29 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                     <td className="px-4 py-3.5 text-right">
                       <div className="flex items-center justify-end gap-1.5">
                         <button
-                          onClick={() => setEditingUserRole({ id: u.id, role: u.role })}
-                          className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-purple-700"
-                          title="Change Role"
+                          onClick={() => handleStartEditUser(u)}
+                          className="rounded-lg p-1.5 text-slate-500 hover:bg-purple-100 hover:text-purple-800 transition"
+                          title="Edit User Profile & Role"
                         >
-                          <Edit className="h-3.5 w-3.5" />
+                          <Edit className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => {
+                            setResettingUser(u);
+                            setNewPasswordVal('');
+                          }}
+                          className="rounded-lg p-1.5 text-slate-500 hover:bg-amber-100 hover:text-amber-800 transition"
+                          title="Reset User Password"
+                        >
+                          <Key className="h-4 w-4" />
                         </button>
                         {u.id !== currentUser.id && (
                           <button
                             onClick={() => handleDeleteUser(u)}
-                            className="rounded-lg p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                            className="rounded-lg p-1.5 text-slate-500 hover:bg-rose-100 hover:text-rose-600 transition"
                             title="Delete User"
                           >
-                            <Trash2 className="h-3.5 w-3.5" />
+                            <Trash2 className="h-4 w-4" />
                           </button>
                         )}
                       </div>
@@ -550,7 +619,7 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
       {/* Tab 2: Vacancies Control */}
       {activeTab === 'vacancies' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h3 className="text-sm font-bold text-slate-800">
                 Active Vacancies Control ({vacancies.length} Postings)
@@ -568,8 +637,63 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
             </button>
           </div>
 
+          {/* Search & Department Filter Bar */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 flex flex-wrap items-center gap-3 text-xs">
+            <div className="relative flex-1 min-w-[200px]">
+              <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Search job title, location or skills..."
+                value={vacSearch}
+                onChange={(e) => setVacSearch(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-9 pr-3 text-slate-900 focus:border-purple-600 focus:outline-none"
+              />
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <span className="font-semibold text-slate-600">Department:</span>
+              <select
+                value={vacDeptFilter}
+                onChange={(e) => setVacDeptFilter(e.target.value)}
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 focus:border-purple-600 focus:outline-none"
+              >
+                <option value="All">All Departments</option>
+                <option value="Technology & IT">Technology & IT</option>
+                <option value="Banking & Finance">Banking & Finance</option>
+                <option value="NGO & Development">NGO & Development</option>
+                <option value="Marketing & Sales">Marketing & Sales</option>
+                <option value="Engineering & Operations">Engineering & Operations</option>
+                <option value="Healthcare & Medical">Healthcare & Medical</option>
+                <option value="Human Resources">Human Resources</option>
+                <option value="Accounting & Audit">Accounting & Audit</option>
+                <option value="Legal & Compliance">Legal & Compliance</option>
+              </select>
+            </div>
+
+            {(vacSearch || vacDeptFilter !== 'All') && (
+              <button
+                onClick={() => {
+                  setVacSearch('');
+                  setVacDeptFilter('All');
+                }}
+                className="text-[11px] font-bold text-purple-700 hover:underline"
+              >
+                Reset Filters
+              </button>
+            )}
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {vacancies.map((v) => (
+            {vacancies
+              .filter((v) => {
+                if (vacDeptFilter !== 'All' && v.department !== vacDeptFilter) return false;
+                if (vacSearch) {
+                  const q = vacSearch.toLowerCase();
+                  return v.title.toLowerCase().includes(q) || v.location.toLowerCase().includes(q) || v.description.toLowerCase().includes(q);
+                }
+                return true;
+              })
+              .map((v) => (
               <div key={v.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs flex flex-col justify-between">
                 <div>
                   <div className="flex items-start justify-between">
@@ -867,6 +991,27 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
               </div>
             </div>
           </div>
+
+          {/* Database Maintenance & Synchronization Action Box */}
+          <div className="rounded-2xl border border-purple-200 bg-gradient-to-r from-purple-50 to-indigo-50 p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <Wrench className="h-5 w-5 text-purple-700" />
+                <h4 className="text-sm font-bold text-purple-950">System Database Synchronization & Repair</h4>
+              </div>
+              <p className="text-xs text-purple-800 mt-1 max-w-xl">
+                Automatically verify and repair all standard demo accounts (System Admin, HR Director, HR Officer, Applicant), populate missing application deadlines, and ensure PostgreSQL database consistency.
+              </p>
+            </div>
+            <button
+              onClick={handleSyncHealth}
+              disabled={syncLoading}
+              className="flex items-center gap-2 rounded-xl bg-purple-900 px-4 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-purple-950 transition disabled:opacity-50 shrink-0"
+            >
+              <RefreshCw className={`h-4 w-4 ${syncLoading ? 'animate-spin' : ''}`} />
+              <span>{syncLoading ? 'Synchronizing...' : 'Run System Sync & Repair'}</span>
+            </button>
+          </div>
         </div>
       )}
 
@@ -970,6 +1115,351 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
           onClose={() => setSelectedAppId(null)}
           onUpdate={() => loadData()}
         />
+      )}
+
+      {/* Modal: Edit Vacancy (System Admin Full Control) */}
+      {editingVacancy && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
+          <div className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-purple-200 px-6 py-4 bg-purple-900 text-white">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-purple-800 text-purple-100">
+                  <Edit className="h-5 w-5" />
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-white">Edit Job Vacancy</h2>
+                  <p className="text-xs text-purple-200">System Admin Full Control over Position Details & Deadline</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setEditingVacancy(null)}
+                className="rounded-lg p-1.5 text-purple-200 hover:bg-purple-800 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditVacancy} className="flex-1 overflow-y-auto p-6 space-y-4 text-xs">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="font-semibold text-slate-700">Job Title *</label>
+                  <input
+                    type="text"
+                    required
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 focus:border-purple-600 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-700">Department / Industry *</label>
+                  <select
+                    value={editDept}
+                    onChange={(e) => setEditDept(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 focus:border-purple-600 focus:outline-none"
+                  >
+                    <option value="Technology & IT">Technology & IT</option>
+                    <option value="Banking & Finance">Banking & Finance</option>
+                    <option value="NGO & Development">NGO & Development</option>
+                    <option value="Marketing & Sales">Marketing & Sales</option>
+                    <option value="Engineering & Operations">Engineering & Operations</option>
+                    <option value="Healthcare & Medical">Healthcare & Medical</option>
+                    <option value="Human Resources">Human Resources</option>
+                    <option value="Accounting & Audit">Accounting & Audit</option>
+                    <option value="Legal & Compliance">Legal & Compliance</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                <div>
+                  <label className="font-semibold text-slate-700">Location in Ethiopia *</label>
+                  <input
+                    type="text"
+                    required
+                    value={editLocation}
+                    onChange={(e) => setEditLocation(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 focus:border-purple-600 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-700">Employment Type</label>
+                  <select
+                    value={editType}
+                    onChange={(e) => setEditType(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 focus:border-purple-600 focus:outline-none"
+                  >
+                    <option value="Full-time">Full-time</option>
+                    <option value="Contract">Contract</option>
+                    <option value="Part-time">Part-time</option>
+                    <option value="Remote (Ethiopia)">Remote (Ethiopia)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-700">Salary Range (ETB)</label>
+                  <input
+                    type="text"
+                    value={editSalary}
+                    onChange={(e) => setEditSalary(e.target.value)}
+                    placeholder="e.g. 50,000 - 75,000 ETB / month"
+                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 focus:border-purple-600 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-700 flex items-center gap-1">
+                    <Calendar className="h-3.5 w-3.5 text-purple-700" />
+                    Application Deadline *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={editDeadline}
+                    onChange={(e) => setEditDeadline(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 focus:border-purple-600 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="font-semibold text-slate-700">Position Status</label>
+                <div className="mt-1 flex items-center gap-4">
+                  <label className="flex items-center gap-1.5 cursor-pointer font-bold text-slate-800">
+                    <input
+                      type="radio"
+                      name="editStatus"
+                      value="Open"
+                      checked={editStatus === 'Open'}
+                      onChange={() => setEditStatus('Open')}
+                      className="text-purple-600 focus:ring-purple-600"
+                    />
+                    <span>Open (Accepting Applications)</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer font-bold text-slate-800">
+                    <input
+                      type="radio"
+                      name="editStatus"
+                      value="Closed"
+                      checked={editStatus === 'Closed'}
+                      onChange={() => setEditStatus('Closed')}
+                      className="text-rose-600 focus:ring-rose-600"
+                    />
+                    <span>Closed (Applications Stopped)</span>
+                  </label>
+                </div>
+              </div>
+
+              <div>
+                <label className="font-semibold text-slate-700">Job Description *</label>
+                <textarea
+                  rows={4}
+                  required
+                  value={editDescription}
+                  onChange={(e) => setEditDescription(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-300 p-2.5 text-slate-900 focus:border-purple-600 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="font-semibold text-slate-700">Candidate Requirements & Qualifications *</label>
+                <textarea
+                  rows={4}
+                  required
+                  value={editRequirements}
+                  onChange={(e) => setEditRequirements(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-300 p-2.5 text-slate-900 focus:border-purple-600 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setEditingVacancy(null)}
+                  className="rounded-lg px-4 py-2 font-semibold text-slate-600 hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={editVacLoading}
+                  className="rounded-lg bg-purple-900 px-5 py-2 font-bold text-white shadow-xs hover:bg-purple-950 disabled:opacity-50"
+                >
+                  {editVacLoading ? 'Saving...' : 'Save Vacancy Changes'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Reset User Password */}
+      {resettingUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="bg-amber-600 px-6 py-4 text-white">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Key className="h-5 w-5" />
+                  <h3 className="font-bold">Reset User Password</h3>
+                </div>
+                <button onClick={() => setResettingUser(null)} className="text-amber-200 hover:text-white">✕</button>
+              </div>
+            </div>
+
+            <form onSubmit={handleResetPassword} className="p-6 space-y-4 text-xs">
+              <div className="rounded-xl bg-amber-50 p-3 text-amber-900 border border-amber-200">
+                <p className="font-bold">Target User: {resettingUser.fullName}</p>
+                <p className="text-[11px] text-amber-800">{resettingUser.email} • Role: {resettingUser.role}</p>
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700">New Password *</label>
+                <input
+                  type="text"
+                  required
+                  minLength={4}
+                  value={newPasswordVal}
+                  onChange={(e) => setNewPasswordVal(e.target.value)}
+                  placeholder="e.g. admin123 or new password"
+                  className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-slate-900 focus:border-amber-600 focus:outline-none"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  This will immediately update the user's password in the PostgreSQL database.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setResettingUser(null)}
+                  className="rounded-xl px-4 py-2 font-bold text-slate-600 hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={resetLoading || !newPasswordVal}
+                  className="rounded-xl bg-amber-600 px-5 py-2 font-bold text-white hover:bg-amber-700 disabled:opacity-50"
+                >
+                  {resetLoading ? 'Resetting...' : 'Update Password'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Edit User Profile & Role */}
+      {editingUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-purple-200 bg-purple-900 px-6 py-4 text-white">
+              <div className="flex items-center gap-2">
+                <Edit className="h-5 w-5 text-purple-200" />
+                <h3 className="font-bold">Edit User Profile & Role</h3>
+              </div>
+              <button onClick={() => setEditingUser(null)} className="text-purple-200 hover:text-white">✕</button>
+            </div>
+
+            <form onSubmit={handleSaveEditUser} className="p-6 space-y-4 text-xs">
+              <div>
+                <label className="font-semibold text-slate-700">Full Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={editUserName}
+                  onChange={(e) => setEditUserName(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-slate-900 focus:border-purple-600 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="font-semibold text-slate-700">Email Address *</label>
+                <input
+                  type="email"
+                  required
+                  value={editUserEmail}
+                  onChange={(e) => setEditUserEmail(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-slate-900 focus:border-purple-600 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="font-semibold text-slate-700">System Role *</label>
+                <select
+                  value={editUserRole}
+                  onChange={(e) => setEditUserRole(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-slate-300 bg-white p-2.5 font-semibold text-slate-900 focus:border-purple-600 focus:outline-none"
+                >
+                  <option value="system_admin">System Administrator (Full Control)</option>
+                  <option value="hr_admin">HR Administrator (Director)</option>
+                  <option value="hr_employee">HR Employee (Recruitment Officer)</option>
+                  <option value="applicant">Candidate / Job Applicant</option>
+                </select>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setEditingUser(null)}
+                  className="rounded-xl px-4 py-2 font-bold text-slate-600 hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={editUserLoading}
+                  className="rounded-xl bg-purple-900 px-5 py-2 font-bold text-white hover:bg-purple-950 disabled:opacity-50"
+                >
+                  {editUserLoading ? 'Saving...' : 'Save User Changes'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: In-App Confirmation Dialog (100% reliable on all browsers & iframes) */}
+      {confirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3 border-b border-rose-100 bg-rose-50 px-6 py-4">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-100 text-rose-600">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">{confirmModal.title}</h3>
+                <p className="text-xs text-rose-700">Permanent Action Warning</p>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <p className="text-xs text-slate-600 leading-relaxed">
+                {confirmModal.message}
+              </p>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setConfirmModal(null)}
+                  className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmModal.onConfirm}
+                  className="rounded-xl bg-rose-600 px-5 py-2 text-xs font-bold text-white hover:bg-rose-700 shadow-xs"
+                >
+                  {confirmModal.confirmLabel || 'Yes, Delete Permanently'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

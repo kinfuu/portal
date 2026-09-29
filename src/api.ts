@@ -144,6 +144,12 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  updateUser: (id: string, data: { fullName?: string; email?: string; role?: string }) =>
+    request<{ message: string; user: User }>(`/users/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+
   updateUserRole: (id: string, role: string) =>
     request<{ user: User }>(`/users/${id}/role`, {
       method: 'PATCH',

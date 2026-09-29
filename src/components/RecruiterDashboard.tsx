@@ -20,10 +20,13 @@ import {
   Trash2,
   LogOut,
   ShieldCheck,
-  Building
+  Building,
+  Calendar,
+  AlertTriangle
 } from 'lucide-react';
 import { ApplicationDetailModal } from './ApplicationDetailModal';
 import { CreateVacancyModal } from './CreateVacancyModal';
+import { formatDeadline, getDeadlineBadge } from './CandidatePortal';
 
 interface RecruiterDashboardProps {
   currentUser: User;
@@ -47,6 +50,8 @@ export const RecruiterDashboard: React.FC<RecruiterDashboardProps> = ({
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
   const [showCreateVacancy, setShowCreateVacancy] = useState(false);
   const [showAddTeamModal, setShowAddTeamModal] = useState(false);
+  const [confirmDeleteVacancy, setConfirmDeleteVacancy] = useState<Vacancy | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   // New team member state
   const [newMemberEmail, setNewMemberEmail] = useState('');
@@ -120,14 +125,22 @@ export const RecruiterDashboard: React.FC<RecruiterDashboardProps> = ({
     }
   };
 
-  const handleDeleteVacancy = async (vac: Vacancy) => {
-    if (!window.confirm(`Are you sure you want to delete vacancy "${vac.title}"?`)) return;
+  const handleDeleteVacancy = (vac: Vacancy) => {
+    setConfirmDeleteVacancy(vac);
+  };
+
+  const executeDeleteVacancy = async () => {
+    if (!confirmDeleteVacancy) return;
+    setDeleteLoading(true);
     try {
-      await api.deleteVacancy(vac.id);
-      setActionNotice({ text: `Vacancy "${vac.title}" deleted.`, type: 'success' });
+      await api.deleteVacancy(confirmDeleteVacancy.id);
+      setActionNotice({ text: `Vacancy "${confirmDeleteVacancy.title}" deleted.`, type: 'success' });
+      setConfirmDeleteVacancy(null);
       loadDashboard();
     } catch (err: any) {
       setActionNotice({ text: err.message || 'Failed to delete vacancy', type: 'error' });
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -520,6 +533,15 @@ export const RecruiterDashboard: React.FC<RecruiterDashboardProps> = ({
                     <span className="font-bold text-emerald-800">{v.salaryRange || 'Competitive ETB'}</span>
                     <span>{v.applicantCount || 0} Applicants</span>
                   </div>
+
+                  {/* Deadline on Vacancy Card */}
+                  <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-2 text-[11px]">
+                    <span className="flex items-center gap-1.5 text-slate-600 font-medium">
+                      <Calendar className="h-3.5 w-3.5 text-emerald-700 shrink-0" />
+                      <span>Deadline: <strong className="text-slate-900 font-bold">{formatDeadline(v.deadline)}</strong></span>
+                    </span>
+                    {getDeadlineBadge(v.deadline)}
+                  </div>
                 </div>
 
                 {isHrAdmin && (
@@ -680,6 +702,47 @@ export const RecruiterDashboard: React.FC<RecruiterDashboardProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Delete Vacancy In-App Confirmation */}
+      {confirmDeleteVacancy && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3 border-b border-rose-100 bg-rose-50 px-6 py-4">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-100 text-rose-600">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Delete Vacancy</h3>
+                <p className="text-xs text-rose-700">Permanent Action Warning</p>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Are you sure you want to permanently delete vacancy <strong className="text-slate-900 font-bold">"{confirmDeleteVacancy.title}"</strong>? All submitted applicant submissions for this vacancy will also be deleted.
+              </p>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteVacancy(null)}
+                  className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={executeDeleteVacancy}
+                  disabled={deleteLoading}
+                  className="rounded-xl bg-rose-600 px-5 py-2 text-xs font-bold text-white hover:bg-rose-700 shadow-xs disabled:opacity-50"
+                >
+                  {deleteLoading ? 'Deleting...' : 'Yes, Delete Vacancy'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

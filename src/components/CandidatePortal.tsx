@@ -143,13 +143,16 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
     return myApplications.find((a) => a.vacancyId === vacId);
   };
 
+  const [confirmWithdrawAppId, setConfirmWithdrawAppId] = useState<string | null>(null);
+
   const handleWithdrawApplication = async (appId: string) => {
-    if (!window.confirm('Are you sure you want to withdraw this application?')) return;
     try {
       await api.deleteApplication(appId);
+      setConfirmWithdrawAppId(null);
       loadData();
     } catch (err: any) {
-      alert(err.message || 'Failed to withdraw application');
+      console.error(err.message || 'Failed to withdraw application');
+      setConfirmWithdrawAppId(null);
     }
   };
 
@@ -505,7 +508,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
                       </button>
 
                       <button
-                        onClick={() => handleWithdrawApplication(app.id)}
+                        onClick={() => setConfirmWithdrawAppId(app.id)}
                         className="rounded-lg p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600 transition"
                         title="Withdraw Application"
                       >
@@ -516,6 +519,35 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
                 ))}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal for Withdraw */}
+      {confirmWithdrawAppId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl text-center space-y-4">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-rose-100 text-rose-600">
+              <Trash2 className="h-6 w-6" />
+            </div>
+            <h4 className="text-base font-bold text-slate-900">Withdraw Application?</h4>
+            <p className="text-xs text-slate-600">
+              Are you sure you want to withdraw this application? This action cannot be undone.
+            </p>
+            <div className="flex gap-2 justify-center pt-2">
+              <button
+                onClick={() => setConfirmWithdrawAppId(null)}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleWithdrawApplication(confirmWithdrawAppId)}
+                className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 shadow-xs"
+              >
+                Yes, Withdraw
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -503,7 +503,44 @@ app.patch('/api/users/:id/role', authenticateToken, async (req: AuthenticatedReq
   }
 });
 
-// DELETE /api/users/:id (System Admin deletes a user)
+// PATCH /api/users/:id (System Admin updates a user's details: fullName, email, role)
+app.patch('/api/users/:id', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!isSystemAdmin(req.user?.role)) {
+      return res.status(403).json({ error: 'Only System Administrators can update users' });
+    }
+
+    const { id } = req.params;
+    const { fullName, email, role } = req.body;
+
+    const result = await pool.query(
+      `UPDATE users
+       SET full_name = COALESCE($1, full_name),
+           email = COALESCE($2, email),
+           role = COALESCE($3, role),
+           updated_at = NOW()
+       WHERE id = $4
+       RETURNING id, email, full_name as "fullName", role, created_at as "createdAt"`,
+      [
+        fullName ? fullName.trim() : null,
+        email ? email.toLowerCase().trim() : null,
+        role || null,
+        id,
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ message: 'User updated successfully', user: result.rows[0] });
+  } catch (err: any) {
+    console.error('Error updating user:', err);
+    res.status(500).json({ error: err.message || 'Failed to update user' });
+  }
+});
+
+// DELETE /api/users/:id (System Admin deletes a user safely)
 app.delete('/api/users/:id', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (!isSystemAdmin(req.user?.role)) {
@@ -515,9 +552,16 @@ app.delete('/api/users/:id', authenticateToken, async (req: AuthenticatedRequest
       return res.status(400).json({ error: 'Cannot delete your own account' });
     }
 
+    // 1. Detach any foreign keys referencing this user in vacancies and documents
+    await pool.query('UPDATE vacancies SET created_by = NULL WHERE created_by = $1', [id]);
+    await pool.query('UPDATE documents SET verified_by = NULL WHERE verified_by = $1', [id]);
+
+    // 2. Delete any applications submitted by this applicant, along with their documents & timeline
     await pool.query(`DELETE FROM documents WHERE application_id IN (SELECT id FROM applications WHERE applicant_id = $1)`, [id]);
     await pool.query(`DELETE FROM application_timeline WHERE application_id IN (SELECT id FROM applications WHERE applicant_id = $1)`, [id]);
     await pool.query(`DELETE FROM applications WHERE applicant_id = $1`, [id]);
+
+    // 3. Delete the user
     const result = await pool.query(`DELETE FROM users WHERE id = $1 RETURNING id`, [id]);
 
     if (result.rows.length === 0) {
@@ -531,8 +575,8 @@ app.delete('/api/users/:id', authenticateToken, async (req: AuthenticatedRequest
   }
 });
 
-// PATCH /api/users/:id/password (System Admin resets a user's password)
-app.patch('/api/users/:id/password', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+// Reset user password handler (supports both PATCH and POST)
+const handleResetUserPassword = async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (!isSystemAdmin(req.user?.role)) {
       return res.status(403).json({ error: 'Only System Administrators can reset user passwords' });
@@ -560,7 +604,10 @@ app.patch('/api/users/:id/password', authenticateToken, async (req: Authenticate
     console.error('Error resetting password:', err);
     res.status(500).json({ error: 'Failed to reset password' });
   }
-});
+};
+
+app.patch('/api/users/:id/password', authenticateToken, handleResetUserPassword);
+app.post('/api/users/:id/password', authenticateToken, handleResetUserPassword);
 
 // POST /api/system/sync-health (System Admin syncs and repairs system state, demo accounts, and vacancy deadlines)
 app.post('/api/system/sync-health', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
@@ -798,8 +845,8 @@ app.post('/api/vacancies', authenticateToken, async (req: AuthenticatedRequest, 
   }
 });
 
-// PUT /api/vacancies/:id (System Admin & HR Admin only)
-app.put('/api/vacancies/:id', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+// PUT & PATCH /api/vacancies/:id (System Admin & HR Admin only)
+const handleUpdateVacancy = async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (!isAdminOrHrAdmin(req.user?.role)) {
       return res.status(403).json({ error: 'Permission denied: Administrator access required' });
@@ -823,7 +870,20 @@ app.put('/api/vacancies/:id', authenticateToken, async (req: AuthenticatedReques
            deadline = COALESCE($11, deadline)
        WHERE id = $12
        RETURNING *`,
-      [title, department, location, type, experienceLevel, salaryRange, description, requirements, status, requiredDocuments, deadline, id]
+      [
+        title ?? null,
+        department ?? null,
+        location ?? null,
+        type ?? null,
+        experienceLevel ?? null,
+        salaryRange ?? null,
+        description ?? null,
+        requirements ?? null,
+        status ?? null,
+        requiredDocuments ?? null,
+        deadline ?? null,
+        id
+      ]
     );
 
     if (result.rows.length === 0) {
@@ -835,7 +895,10 @@ app.put('/api/vacancies/:id', authenticateToken, async (req: AuthenticatedReques
     console.error('Error updating vacancy:', error);
     res.status(500).json({ error: 'Failed to update vacancy' });
   }
-});
+};
+
+app.put('/api/vacancies/:id', authenticateToken, handleUpdateVacancy);
+app.patch('/api/vacancies/:id', authenticateToken, handleUpdateVacancy);
 
 // DELETE /api/vacancies/:id (System Admin & HR Admin only)
 app.delete('/api/vacancies/:id', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
