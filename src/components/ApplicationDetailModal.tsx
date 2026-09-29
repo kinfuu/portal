@@ -43,6 +43,8 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
   const [recruiterNotes, setRecruiterNotes] = useState<string>('');
   const [timelineComment, setTimelineComment] = useState<string>('');
 
+  const [notice, setNotice] = useState<string | null>(null);
+
   const loadData = async () => {
     try {
       setLoading(true);
@@ -52,7 +54,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
       setRecruiterRating(data.recruiterRating || 0);
       setRecruiterNotes(data.recruiterNotes || '');
     } catch (err: any) {
-      alert(err.message || 'Failed to load application');
+      setNotice(err.message || 'Failed to load application');
     } finally {
       setLoading(false);
     }
@@ -73,10 +75,12 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
         comment: timelineComment || `HR updated candidate stage to ${status}`,
       });
       setTimelineComment('');
+      setNotice('Application updated successfully!');
       await loadData();
       triggerRefresh();
+      setTimeout(() => setNotice(null), 3000);
     } catch (err: any) {
-      alert(err.message || 'Failed to update application');
+      setNotice(err.message || 'Failed to update application');
     } finally {
       setUpdating(false);
     }
@@ -130,6 +134,13 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
 
         {/* Modal Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-5">
+          {notice && (
+            <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3 text-xs font-semibold text-emerald-900 flex items-center justify-between">
+              <span>{notice}</span>
+              <button onClick={() => setNotice(null)} className="text-emerald-700 hover:text-emerald-900">✕</button>
+            </div>
+          )}
+
           {/* Status Pipeline Progress */}
           <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs">
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2.5">
