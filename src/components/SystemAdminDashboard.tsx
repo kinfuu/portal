@@ -476,9 +476,31 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
   const [loadingMigrationSql, setLoadingMigrationSql] = useState(false);
   const [copiedMigrationSql, setCopiedMigrationSql] = useState(false);
   const [testConnectionString, setTestConnectionString] = useState('');
+  const [testDbPassword, setTestDbPassword] = useState('');
   const [testingConnection, setTestingConnection] = useState(false);
   const [connectionTestResult, setConnectionTestResult] = useState<any | null>(null);
   const [connectionTestError, setConnectionTestError] = useState<string | null>(null);
+  const [applyingConnection, setApplyingConnection] = useState(false);
+  const [connectionAppliedMessage, setConnectionAppliedMessage] = useState<string | null>(null);
+
+  const getEffectiveConnectionString = () => {
+    let uri = testConnectionString.trim();
+    if (!uri) return '';
+    if (testDbPassword) {
+      const encodedPass = encodeURIComponent(testDbPassword);
+      if (uri.includes('[YOUR-PASSWORD]')) {
+        uri = uri.replace(/\[YOUR-PASSWORD\]/g, encodedPass);
+      } else if (uri.includes('[your-password]')) {
+        uri = uri.replace(/\[your-password\]/g, encodedPass);
+      } else if (uri.includes('[PASSWORD]')) {
+        uri = uri.replace(/\[PASSWORD\]/g, encodedPass);
+      } else {
+        // Replace password between user: and @host
+        uri = uri.replace(/(:\/\/[^:]+:)([^@]+)(@)/, `$1${encodedPass}$3`);
+      }
+    }
+    return uri;
+  };
 
   const loadSupabaseMigration = async () => {
     setLoadingMigrationSql(true);
@@ -495,12 +517,14 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
   };
 
   const handleTestConnection = async () => {
-    if (!testConnectionString.trim()) return;
+    const uriToTest = getEffectiveConnectionString();
+    if (!uriToTest) return;
     setTestingConnection(true);
     setConnectionTestError(null);
     setConnectionTestResult(null);
+    setConnectionAppliedMessage(null);
     try {
-      const res = await api.testDatabaseConnection(testConnectionString);
+      const res = await api.testDatabaseConnection(uriToTest);
       if (res && res.ok) {
         setConnectionTestResult(res);
       } else {
@@ -510,6 +534,26 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
       setConnectionTestError(err.message || 'Connection test failed');
     } finally {
       setTestingConnection(false);
+    }
+  };
+
+  const handleApplyConnection = async () => {
+    const uriToApply = getEffectiveConnectionString();
+    if (!uriToApply) return;
+    setApplyingConnection(true);
+    setConnectionTestError(null);
+    try {
+      const res = await api.applyDatabaseConnection(uriToApply);
+      if (res && res.ok) {
+        setConnectionAppliedMessage(res.message || 'Successfully connected to Supabase database!');
+        await loadData();
+      } else {
+        setConnectionTestError(res?.error || 'Failed to activate database connection');
+      }
+    } catch (err: any) {
+      setConnectionTestError(err.message || 'Failed to activate database connection');
+    } finally {
+      setApplyingConnection(false);
     }
   };
 
@@ -2761,23 +2805,49 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
               <span className="text-[11px] font-mono text-slate-400">Pooler Port 6543 or Direct Port 5432</span>
             </div>
 
-            <div className="flex flex-col sm:flex-row gap-2">
-              <input
-                type="text"
-                value={testConnectionString}
-                onChange={(e) => setTestConnectionString(e.target.value)}
-                placeholder="postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres"
-                className="flex-1 rounded-xl border border-slate-300 px-3.5 py-2.5 font-mono text-xs text-slate-900 focus:border-emerald-600 focus:outline-none"
-              />
-              <button
-                type="button"
-                onClick={handleTestConnection}
-                disabled={testingConnection || !testConnectionString.trim()}
-                className="flex items-center justify-center gap-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 px-5 py-2.5 text-xs font-bold text-white transition disabled:opacity-50"
-              >
-                <RefreshCw className={`h-3.5 w-3.5 ${testingConnection ? 'animate-spin' : ''}`} />
-                <span>{testingConnection ? 'Testing...' : 'Test Supabase Connection'}</span>
-              </button>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  1. Supabase Connection String (from Supabase "Connect" or Project Settings)
+                </label>
+                <input
+                  type="text"
+                  value={testConnectionString}
+                  onChange={(e) => setTestConnectionString(e.target.value)}
+                  placeholder="postgresql://postgres.[ref]:[YOUR-PASSWORD]@aws-0-[region].pooler.supabase.com:6543/postgres"
+                  className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 font-mono text-xs text-slate-900 focus:border-emerald-600 focus:outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <div className="sm:col-span-2">
+                  <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    2. Your Database Password (replaces [YOUR-PASSWORD] automatically)
+                  </label>
+                  <input
+                    type="password"
+                    value={testDbPassword}
+                    onChange={(e) => setTestDbPassword(e.target.value)}
+                    placeholder="Type your actual database password here..."
+                    className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs text-slate-900 focus:border-emerald-600 focus:outline-none"
+                  />
+                  <div className="text-[10px] text-slate-500 mt-1">
+                    No need to manually edit brackets! The app automatically inserts this password and encodes special symbols safely.
+                  </div>
+                </div>
+
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    onClick={handleTestConnection}
+                    disabled={testingConnection || !testConnectionString.trim()}
+                    className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 px-5 py-2.5 text-xs font-bold text-white transition disabled:opacity-50 h-[38px]"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${testingConnection ? 'animate-spin' : ''}`} />
+                    <span>{testingConnection ? 'Testing...' : 'Test Connection'}</span>
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* Connection Test Results */}
@@ -2802,6 +2872,34 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                     ))}
                   </div>
                 )}
+
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-emerald-200">
+                  <div className="text-[11px] text-emerald-800">
+                    Connection tested and verified. Ready to route all live applications, vacancies, and logins through Supabase.
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleApplyConnection}
+                    disabled={applyingConnection}
+                    className="flex items-center justify-center gap-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 px-4 py-2 text-xs font-bold text-white shadow-xs transition"
+                  >
+                    <Server className={`h-3.5 w-3.5 ${applyingConnection ? 'animate-spin' : ''}`} />
+                    <span>{applyingConnection ? 'Activating Supabase...' : '⚡ Connect & Set as Active Database'}</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {connectionAppliedMessage && (
+              <div className="rounded-xl border border-emerald-300 bg-emerald-100 p-4 text-xs text-emerald-950 flex items-start gap-2.5">
+                <CheckCircle className="h-5 w-5 text-emerald-700 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-bold text-emerald-900 text-sm">Supabase Database Connected & Active!</div>
+                  <div className="text-emerald-800 mt-0.5">{connectionAppliedMessage}</div>
+                  <div className="text-[11px] text-emerald-700 font-mono mt-1">
+                    DATABASE_URL has been saved to your environment. All live queries and candidate submissions are now querying and storing directly in your Supabase project.
+                  </div>
+                </div>
               </div>
             )}
 

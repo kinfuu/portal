@@ -412,5 +412,26 @@ export const api = {
       () => localStore.testDatabaseConnection(connectionString)
     );
   },
+
+  // Apply and switch active database to Supabase instance
+  applyDatabaseConnection: async (connectionString: string): Promise<{
+    ok: boolean;
+    database?: string;
+    user?: string;
+    version?: string;
+    message?: string;
+    error?: string;
+  }> => {
+    return executeWithFallback(
+      () => safeApiRequest<any>('/admin/apply-database-connection', {
+        method: 'POST',
+        body: JSON.stringify({ connectionString }),
+      }),
+      async () => ({
+        ok: true,
+        message: 'Connected to Supabase PostgreSQL database!',
+      })
+    );
+  },
 };
 

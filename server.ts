@@ -5,7 +5,7 @@ import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import path from 'path';
 import pg from 'pg';
-import { pool } from './src/db/index.js';
+import { pool, updatePool } from './src/db/index.js';
 import { GoogleGenAI } from '@google/genai';
 
 const app = express();
@@ -2195,6 +2195,13 @@ app.post('/api/admin/test-database-connection', authenticateToken, async (req: A
       });
     }
 
+    if (trimmed.includes('[YOUR-PASSWORD]') || trimmed.includes('[your-password]') || trimmed.includes('[PASSWORD]')) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Please replace the [YOUR-PASSWORD] placeholder with your actual Supabase database password before testing.',
+      });
+    }
+
     // Attempt short connection test with 6 second timeout
     const testPool = new pg.Pool({
       connectionString: trimmed,
@@ -2240,9 +2247,94 @@ app.post('/api/admin/test-database-connection', authenticateToken, async (req: A
     }
   } catch (error: any) {
     console.error('Database connection test error:', error);
+    let friendlyError = error.message || 'Failed to connect to database';
+    if (error.message?.includes('SASL authentication failed') || error.message?.includes('password authentication failed')) {
+      friendlyError = 'Incorrect database password (SASL authentication failed). In Supabase, reset your password under Project Settings → Database → "Reset database password", then use the new password.';
+    } else if (error.code === 'ETIMEDOUT' || error.message?.includes('timeout') || error.code === 'ENETUNREACH') {
+      friendlyError = 'Connection timed out. In Supabase "Connect" modal, please select Mode: "Transaction" (port 6543) instead of direct port 5432.';
+    }
+
     res.status(400).json({
       ok: false,
-      error: error.message || 'Failed to connect to database',
+      error: friendlyError,
+      code: error.code,
+    });
+  }
+});
+
+// POST /api/admin/apply-database-connection (Apply and switch to live Supabase connection URI)
+app.post('/api/admin/apply-database-connection', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!isSystemAdmin(req.user?.role)) {
+      return res.status(403).json({ error: 'Permission denied: System Administrator required' });
+    }
+
+    const { connectionString } = req.body;
+    if (!connectionString || typeof connectionString !== 'string' || !connectionString.trim()) {
+      return res.status(400).json({ ok: false, error: 'Connection string is required' });
+    }
+
+    const trimmed = connectionString.trim();
+    if (!trimmed.startsWith('postgres://') && !trimmed.startsWith('postgresql://')) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid connection string format. It must start with postgresql:// or postgres://',
+      });
+    }
+
+    // 1. Verify connection
+    const testPool = new pg.Pool({
+      connectionString: trimmed,
+      ssl: { rejectUnauthorized: false },
+      connectionTimeoutMillis: 7000,
+      idleTimeoutMillis: 1000,
+    });
+
+    const client = await testPool.connect();
+    const verRes = await client.query('SELECT current_database() as db, current_user as usr, version() as ver;');
+    client.release();
+    await testPool.end();
+
+    // 2. Set environment variable and update database pool
+    process.env.DATABASE_URL = trimmed;
+    updatePool(trimmed);
+
+    // 3. Write to .env file for persistence across restarts
+    try {
+      const envPath = path.resolve('.env');
+      let envContent = '';
+      if (fs.existsSync(envPath)) {
+        envContent = fs.readFileSync(envPath, 'utf8');
+      }
+      if (envContent.includes('DATABASE_URL=')) {
+        envContent = envContent.replace(/DATABASE_URL=.*/g, `DATABASE_URL="${trimmed}"`);
+      } else {
+        envContent += `\nDATABASE_URL="${trimmed}"\n`;
+      }
+      fs.writeFileSync(envPath, envContent.trim() + '\n', 'utf8');
+    } catch (fsErr) {
+      console.warn('Could not persist to .env file:', fsErr);
+    }
+
+    // 4. Run seedInitialData to ensure all tables, sequences, and demo accounts are synchronized
+    try {
+      await seedInitialData();
+    } catch (seedErr) {
+      console.warn('Post-connection seed sync:', seedErr);
+    }
+
+    res.json({
+      ok: true,
+      database: verRes.rows[0]?.db,
+      user: verRes.rows[0]?.usr,
+      version: verRes.rows[0]?.ver,
+      message: 'TalentFlow is now actively connected to your Supabase PostgreSQL database!',
+    });
+  } catch (error: any) {
+    console.error('Database connection apply error:', error);
+    res.status(400).json({
+      ok: false,
+      error: error.message || 'Failed to apply database connection',
       code: error.code,
     });
   }
