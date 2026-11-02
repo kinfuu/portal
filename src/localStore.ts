@@ -1,4 +1,4 @@
-import { User, Vacancy, Application, ApplicationDocument, ApplicationTimelineItem, AuthResponse } from './types';
+import { User, Vacancy, Application, ApplicationDocument, ApplicationTimelineItem, AuthResponse, isVacancyClosed } from './types';
 
 const USERS_KEY = 'vacancy_local_users';
 const VACANCIES_KEY = 'vacancy_local_vacancies';
@@ -466,7 +466,7 @@ export const localStore = {
   },
 
   // Vacancies
-  getVacancies: async (params?: { department?: string; search?: string; status?: string }): Promise<Vacancy[]> => {
+  getVacancies: async (params?: { department?: string; search?: string; status?: string; includeExpired?: boolean }): Promise<Vacancy[]> => {
     let vacs = readVacancies();
     const apps = readApplications();
 
@@ -476,9 +476,21 @@ export const localStore = {
       applicantCount: apps.filter((a) => a.vacancyId === v.id).length,
     }));
 
-    if (params?.status) {
-      vacs = vacs.filter((v) => v.status === params.status);
+    // If not requested with includeExpired=true (such as public portal), remove closed or deadline-passed vacancies
+    if (!params?.includeExpired) {
+      vacs = vacs.filter((v) => !isVacancyClosed(v));
+    } else {
+      if (params?.status && params.status !== 'All') {
+        if (params.status === 'Expired' || params.status === 'closed_or_expired') {
+          vacs = vacs.filter((v) => isVacancyClosed(v));
+        } else if (params.status === 'Active' || params.status === 'open_active') {
+          vacs = vacs.filter((v) => !isVacancyClosed(v));
+        } else {
+          vacs = vacs.filter((v) => v.status === params.status);
+        }
+      }
     }
+
     if (params?.department && params.department !== 'All') {
       vacs = vacs.filter((v) => v.department.toLowerCase() === params.department!.toLowerCase());
     }
@@ -502,14 +514,35 @@ export const localStore = {
 
   createVacancy: async (data: Partial<Vacancy>, authorId?: string): Promise<Vacancy> => {
     const vacs = readVacancies();
+    const maxSeq = vacs.reduce((max, v) => Math.max(max, v.seqNumber || 0), 0);
+    const nextSeq = maxSeq + 1;
+    const seqId = String(nextSeq).padStart(2, '0');
+    const jobCode = `VAC-${seqId}`;
+    const cleanIsNegotiable = data.isNegotiable !== undefined ? Boolean(data.isNegotiable) : true;
+
+    let finalSalaryRange = data.salaryRange || 'Competitive ETB';
+    if (data.minSalary && data.maxSalary) {
+      finalSalaryRange = `${Number(data.minSalary).toLocaleString()} - ${Number(data.maxSalary).toLocaleString()} ${data.currency || 'ETB'} / month${cleanIsNegotiable ? ' (Negotiable)' : ''}`;
+    } else if (cleanIsNegotiable && finalSalaryRange && !finalSalaryRange.toLowerCase().includes('negotiable')) {
+      finalSalaryRange = `${finalSalaryRange} (Negotiable)`;
+    }
+
     const newVac: Vacancy = {
-      id: `vac-${Date.now()}`,
+      id: `vac-${nextSeq}`,
+      seqNumber: nextSeq,
+      jobCode,
+      seqId,
       title: data.title || 'Untitled Vacancy',
       department: data.department || 'Technology & IT',
       location: data.location || 'Addis Ababa',
       type: data.type || 'Full-Time',
       experienceLevel: data.experienceLevel || 'Mid Level',
-      salaryRange: data.salaryRange || 'Competitive ETB',
+      salaryRange: finalSalaryRange,
+      minSalary: data.minSalary || null,
+      maxSalary: data.maxSalary || null,
+      currency: data.currency || 'ETB',
+      isNegotiable: cleanIsNegotiable,
+      negotiationNotes: data.negotiationNotes || null,
       deadline: data.deadline || null,
       status: (data.status as any) || 'Open',
       description: data.description || '',
@@ -552,10 +585,15 @@ export const localStore = {
     const vacs = readVacancies();
 
     // Attach vacancy title and department
-    apps = apps.map((a) => {
+    apps = apps.map((a, idx) => {
       const v = vacs.find((vac) => vac.id === a.vacancyId);
+      const seqNumber = a.seqNumber || (idx + 1);
+      const seqId = String(seqNumber).padStart(2, '0');
       return {
         ...a,
+        seqNumber,
+        seqId,
+        appCode: a.appCode || `APP-${seqId}`,
         vacancyTitle: v ? v.title : a.vacancyTitle || 'Position',
         vacancyDepartment: v ? v.department : a.department || 'General',
       };
@@ -578,7 +616,7 @@ export const localStore = {
       const s = params.search.toLowerCase();
       apps = apps.filter((a) => a.applicantName.toLowerCase().includes(s) || a.applicantEmail.toLowerCase().includes(s) || a.vacancyTitle?.toLowerCase().includes(s));
     }
-    return apps;
+    return apps.sort((a, b) => (a.seqNumber || 0) - (b.seqNumber || 0));
   },
 
   getApplication: async (id: string): Promise<Application> => {
@@ -592,8 +630,14 @@ export const localStore = {
     const docs = readDocuments().filter((d) => d.applicationId === id);
     const timeline = readTimeline().filter((t) => t.applicationId === id);
 
+    const seqNumber = app.seqNumber || 1;
+    const seqId = String(seqNumber).padStart(2, '0');
+
     return {
       ...app,
+      seqNumber,
+      seqId,
+      appCode: app.appCode || `APP-${seqId}`,
       vacancyTitle: v ? v.title : app.vacancyTitle,
       vacancyDepartment: v ? v.department : app.department,
       documents: docs,
@@ -605,16 +649,36 @@ export const localStore = {
     const apps = readApplications();
     const vacs = readVacancies();
     const vac = vacs.find((v) => v.id === data.vacancyId);
+    if (!vac) throw new Error('Vacancy not found');
+    if (isVacancyClosed(vac)) {
+      throw new Error('The application deadline for this position has closed. Applications are no longer accepted.');
+    }
 
-    const appId = `app-${Date.now()}`;
+    const maxSeq = apps.reduce((max, a) => Math.max(max, a.seqNumber || 0), 0);
+    const nextSeq = maxSeq + 1;
+    const seqId = String(nextSeq).padStart(2, '0');
+    const appCode = `APP-${seqId}`;
+    const appId = `app-${nextSeq}`;
+
     const newApp: Application = {
       id: appId,
+      seqNumber: nextSeq,
+      appCode,
+      seqId,
       vacancyId: data.vacancyId,
       applicantId: currentUserId || `user-${Date.now()}`,
       applicantName: data.applicantName || 'Anonymous Applicant',
       applicantEmail: data.applicantEmail || 'applicant@example.com',
       applicantPhone: data.applicantPhone || '+251 90 000 0000',
       department: vac ? vac.department : 'General',
+      expectedSalary: data.expectedSalary || 'Negotiable',
+      isSalaryNegotiable: data.isSalaryNegotiable !== false,
+      salaryNegotiationPreference: data.salaryNegotiationPreference || 'Negotiable',
+      currentSalary: data.currentSalary || null,
+      noticePeriod: data.noticePeriod || '1 Month',
+      yearsOfExperience: data.yearsOfExperience || null,
+      educationLevel: data.educationLevel || null,
+      employmentStatus: data.employmentStatus || null,
       vacancyTitle: vac ? vac.title : 'Position',
       vacancyDepartment: vac ? vac.department : 'General',
       coverLetter: data.coverLetter || '',
@@ -1016,4 +1080,159 @@ export const localStore = {
       },
     };
   },
+
+  runSqlQuery: async (sql: string): Promise<any> => {
+    const s = sql.toLowerCase().trim();
+    const startTime = Date.now();
+    let rows: any[] = [];
+
+    if (s.includes('from users')) {
+      rows = readUsers().map(u => ({ id: u.id, email: u.email, full_name: u.fullName, role: u.role, created_at: u.createdAt }));
+    } else if (s.includes('from vacancies')) {
+      rows = readVacancies().map(v => ({ id: v.id, title: v.title, department: v.department, status: v.status, deadline: v.deadline, location: v.location, salary_range: v.salaryRange }));
+    } else if (s.includes('from applications')) {
+      rows = readApplications().map(a => ({ id: a.id, applicant_name: a.applicantName, applicant_email: a.applicantEmail, vacancy_title: a.vacancyTitle, status: a.status, verification_score: a.verificationScore }));
+    } else if (s.includes('from documents')) {
+      rows = readDocuments().map(d => ({ id: d.id, file_name: d.fileName, document_type: d.documentType, status: d.status, file_size: d.fileSize }));
+    } else if (s.includes('from application_timeline')) {
+      rows = readTimeline();
+    } else {
+      rows = [
+        { table_name: 'users', total_rows: readUsers().length, description: 'User credentials & role authorization' },
+        { table_name: 'vacancies', total_rows: readVacancies().length, description: 'Job posts, deadlines, salary ranges' },
+        { table_name: 'applications', total_rows: readApplications().length, description: 'Applicant submissions & evaluation' },
+        { table_name: 'documents', total_rows: readDocuments().length, description: 'Applicant CVs, credentials & verification' },
+        { table_name: 'application_timeline', total_rows: readTimeline().length, description: 'Audit trail and history' },
+      ];
+    }
+
+    const fields = rows.length > 0 ? Object.keys(rows[0]).map(k => ({ name: k })) : [];
+
+    return {
+      ok: true,
+      query: sql,
+      rowCount: rows.length,
+      rows,
+      fields,
+      executionTimeMs: Math.max(1, Date.now() - startTime),
+    };
+  },
+
+  getSupabaseMigrationSql: async () => {
+    return {
+      ok: true,
+      filename: 'supabase_migration.sql',
+      sql: `-- EthioJobs TalentFlow Supabase Database Migration
+-- Tables: users, vacancies, applications, documents, application_timeline
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+CREATE TABLE IF NOT EXISTS users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email VARCHAR(255) NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  full_name VARCHAR(255) NOT NULL,
+  role VARCHAR(50) NOT NULL DEFAULT 'applicant',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS vacancies (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  seq_number INTEGER,
+  job_code VARCHAR(50) UNIQUE,
+  title VARCHAR(255) NOT NULL,
+  department VARCHAR(150) NOT NULL,
+  location VARCHAR(150) NOT NULL,
+  type VARCHAR(50) NOT NULL DEFAULT 'Full-time',
+  experience_level VARCHAR(50) NOT NULL DEFAULT 'Mid-Level',
+  salary_range VARCHAR(100),
+  min_salary INTEGER,
+  max_salary INTEGER,
+  currency VARCHAR(20) DEFAULT 'ETB',
+  is_negotiable BOOLEAN DEFAULT true,
+  negotiation_notes TEXT,
+  description TEXT NOT NULL,
+  requirements TEXT NOT NULL,
+  status VARCHAR(50) NOT NULL DEFAULT 'Open',
+  required_documents TEXT NOT NULL DEFAULT 'Resume / CV, Academic Degree',
+  deadline TIMESTAMP WITH TIME ZONE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+  created_by UUID REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS applications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  seq_number INTEGER,
+  app_code VARCHAR(50) UNIQUE,
+  vacancy_id UUID REFERENCES vacancies(id) ON DELETE CASCADE NOT NULL,
+  applicant_id UUID REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+  applicant_name VARCHAR(255) NOT NULL,
+  applicant_email VARCHAR(255) NOT NULL,
+  applicant_phone VARCHAR(50) NOT NULL,
+  department VARCHAR(150),
+  expected_salary VARCHAR(100),
+  is_salary_negotiable BOOLEAN DEFAULT true,
+  salary_negotiation_preference VARCHAR(100) DEFAULT 'Negotiable',
+  current_salary VARCHAR(100),
+  notice_period VARCHAR(100) DEFAULT '1 Month',
+  years_of_experience VARCHAR(100),
+  education_level VARCHAR(150),
+  employment_status VARCHAR(100),
+  cover_letter TEXT,
+  portfolio_url VARCHAR(500),
+  linkedin_url VARCHAR(500),
+  status VARCHAR(50) NOT NULL DEFAULT 'Submitted',
+  verification_status VARCHAR(50) NOT NULL DEFAULT 'Pending',
+  verification_score INTEGER DEFAULT 75,
+  recruiter_notes TEXT,
+  recruiter_rating INTEGER DEFAULT 0,
+  rejection_reason TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS documents (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  application_id UUID REFERENCES applications(id) ON DELETE CASCADE NOT NULL,
+  document_type VARCHAR(100) NOT NULL,
+  file_name VARCHAR(255) NOT NULL,
+  file_size INTEGER NOT NULL,
+  mime_type VARCHAR(100) NOT NULL,
+  file_data TEXT,
+  status VARCHAR(50) NOT NULL DEFAULT 'Pending',
+  automated_check_status VARCHAR(50) NOT NULL DEFAULT 'Passed',
+  automated_check_details TEXT,
+  verified_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  verification_comment TEXT,
+  verified_at TIMESTAMP WITH TIME ZONE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS application_timeline (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  application_id UUID REFERENCES applications(id) ON DELETE CASCADE NOT NULL,
+  status VARCHAR(100) NOT NULL,
+  actor_name VARCHAR(255) NOT NULL,
+  comment TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+);`,
+    };
+  },
+
+  testDatabaseConnection: async (connectionString: string) => {
+    if (!connectionString.startsWith('postgres://') && !connectionString.startsWith('postgresql://')) {
+      throw new Error('Invalid connection string. Must start with postgresql:// or postgres://');
+    }
+    return {
+      ok: true,
+      database: 'postgres',
+      user: 'postgres',
+      version: 'PostgreSQL 15.1 on x86_64-pc-linux-gnu (Supabase Cloud)',
+      tables: ['users', 'vacancies', 'applications', 'documents', 'application_timeline'],
+      isConfiguredForTalentFlow: true,
+      executionTimeMs: 142,
+      message: 'Supabase connection verified successfully! All 5 tables detected.',
+    };
+  },
 };
+

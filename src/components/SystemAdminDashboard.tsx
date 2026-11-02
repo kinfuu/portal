@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Vacancy, Application } from '../types';
+import { User, Vacancy, Application, isVacancyClosed, formatSequentialId } from '../types';
 import { api } from '../api';
 import {
   Users,
@@ -30,7 +30,12 @@ import {
   Check,
   FileCheck,
   Phone,
-  Mail
+  Mail,
+  Terminal,
+  Play,
+  Table,
+  Copy,
+  Server
 } from 'lucide-react';
 import { CreateVacancyModal } from './CreateVacancyModal';
 import { ApplicationDetailModal } from './ApplicationDetailModal';
@@ -76,6 +81,354 @@ export function getDeadlineBadge(deadlineStr?: string | null) {
   }
 }
 
+export const TABLE_QUERIES: Record<string, {
+  name: string;
+  description: string;
+  schemaFile: string;
+  serverFile: string;
+  columns: { name: string; type: string; desc: string }[];
+  queries: {
+    id: string;
+    title: string;
+    type: 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE';
+    purpose: string;
+    codeLocation: string;
+    sql: string;
+  }[];
+}> = {
+  users: {
+    name: 'users',
+    description: 'Stores system accounts, passwords (bcrypt hashed), full names, and RBAC roles.',
+    schemaFile: 'src/db/schema.ts (lines 3-11)',
+    serverFile: 'server.ts (lines 398-600)',
+    columns: [
+      { name: 'id', type: 'uuid (Primary Key)', desc: 'Unique identifier generated via defaultRandom()' },
+      { name: 'email', type: 'varchar(255) UNIQUE', desc: 'Unique login email address' },
+      { name: 'password_hash', type: 'text', desc: 'Salted bcrypt password hash (cost 10)' },
+      { name: 'full_name', type: 'varchar(255)', desc: 'Full display name of user' },
+      { name: 'role', type: 'varchar(50)', desc: "'system_admin' | 'hr_admin' | 'hr_employee' | 'applicant'" },
+      { name: 'created_at', type: 'timestamp', desc: 'Creation timestamp' },
+    ],
+    queries: [
+      {
+        id: 'u-select-all',
+        title: 'Fetch All Users (With Role & Search Filters)',
+        type: 'SELECT',
+        purpose: 'Retrieved by System Admin and HR Admin to manage users and staff credentials.',
+        codeLocation: 'server.ts -> GET /api/users',
+        sql: `SELECT id, email, full_name as "fullName", role, created_at as "createdAt"
+FROM users
+ORDER BY created_at DESC;`,
+      },
+      {
+        id: 'u-select-login',
+        title: 'Authentication & Lookup by Email',
+        type: 'SELECT',
+        purpose: 'Verifies email address and returns password_hash for bcrypt validation.',
+        codeLocation: 'server.ts -> POST /api/auth/login',
+        sql: `SELECT id, email, password_hash, full_name, role, created_at
+FROM users
+WHERE email = $1;`,
+      },
+      {
+        id: 'u-insert',
+        title: 'Create User / Register Candidate / Provision Staff',
+        type: 'INSERT',
+        purpose: 'Inserts new user record with hashed password and assigned system role.',
+        codeLocation: 'server.ts -> POST /api/users',
+        sql: `INSERT INTO users (email, password_hash, full_name, role)
+VALUES ($1, $2, $3, $4)
+RETURNING id, email, full_name as "fullName", role, created_at as "createdAt";`,
+      },
+      {
+        id: 'u-update-details',
+        title: 'Update User Profile & Role',
+        type: 'UPDATE',
+        purpose: 'System Admin edits user full name, email, or role.',
+        codeLocation: 'server.ts -> PATCH /api/users/:id',
+        sql: `UPDATE users
+SET full_name = COALESCE($1, full_name),
+    email = COALESCE($2, email),
+    role = COALESCE($3, role),
+    updated_at = NOW()
+WHERE id = $4
+RETURNING id, email, full_name as "fullName", role;`,
+      },
+      {
+        id: 'u-update-password',
+        title: 'Reset User Password',
+        type: 'UPDATE',
+        purpose: 'System Admin resets user password to a newly hashed password.',
+        codeLocation: 'server.ts -> PATCH /api/users/:id/password',
+        sql: `UPDATE users
+SET password_hash = $1,
+    updated_at = NOW()
+WHERE id = $2
+RETURNING id, email, full_name as "fullName", role;`,
+      },
+      {
+        id: 'u-delete',
+        title: 'Safely Delete User (With Cascade Cleanup)',
+        type: 'DELETE',
+        purpose: 'System Admin deletes user after detaching foreign keys in vacancies and applications.',
+        codeLocation: 'server.ts -> DELETE /api/users/:id',
+        sql: `DELETE FROM users
+WHERE id = $1
+RETURNING id;`,
+      },
+    ],
+  },
+  vacancies: {
+    name: 'vacancies',
+    description: 'Stores job openings, requirements, deadline dates, and status.',
+    schemaFile: 'src/db/schema.ts (lines 13-28)',
+    serverFile: 'server.ts (lines 620-830)',
+    columns: [
+      { name: 'id', type: 'uuid (Primary Key)', desc: 'Unique vacancy identifier' },
+      { name: 'title', type: 'varchar(255)', desc: 'Job vacancy title' },
+      { name: 'department', type: 'varchar(150)', desc: 'Department (IT, Banking, NGO, Sales)' },
+      { name: 'location', type: 'varchar(150)', desc: 'Work location / city' },
+      { name: 'type', type: 'varchar(50)', desc: "'Full-time' | 'Part-time' | 'Remote' | 'Contract'" },
+      { name: 'deadline', type: 'timestamp', desc: 'Application deadline date and time' },
+      { name: 'status', type: 'varchar(50)', desc: "'Open' | 'Closed' | 'Draft'" },
+      { name: 'created_by', type: 'uuid (FK -> users.id)', desc: 'Authoring recruiter or admin ID' },
+    ],
+    queries: [
+      {
+        id: 'v-select-public',
+        title: 'Fetch Public Active Vacancies (Deadline Enforced)',
+        type: 'SELECT',
+        purpose: 'Shown on Candidate Portal. Automatically filters out expired vacancies whose deadline is passed or status is Closed.',
+        codeLocation: 'server.ts -> GET /api/vacancies',
+        sql: `SELECT *
+FROM vacancies
+WHERE status = 'Open'
+  AND (deadline IS NULL OR deadline >= NOW())
+ORDER BY created_at DESC;`,
+      },
+      {
+        id: 'v-select-admin-all',
+        title: 'Fetch All Vacancies (Stored Admin Database)',
+        type: 'SELECT',
+        purpose: 'Retrieved by System Admin and HR Admin to view, edit, or reopen active and closed vacancies.',
+        codeLocation: 'server.ts -> GET /api/vacancies?includeExpired=true',
+        sql: `SELECT *
+FROM vacancies
+ORDER BY created_at DESC;`,
+      },
+      {
+        id: 'v-select-closed',
+        title: 'Query Closed / Expired Vacancies',
+        type: 'SELECT',
+        purpose: 'Isolates vacancies that are past their deadline or closed, safely archived in the database.',
+        codeLocation: 'Admin Dashboard Visibility Filter',
+        sql: `SELECT id, title, department, status, deadline
+FROM vacancies
+WHERE status = 'Closed'
+   OR (deadline IS NOT NULL AND deadline < NOW())
+ORDER BY deadline DESC;`,
+      },
+      {
+        id: 'v-insert',
+        title: 'Create New Vacancy',
+        type: 'INSERT',
+        purpose: 'Creates a new vacancy post with requirements, department, and deadline.',
+        codeLocation: 'server.ts -> POST /api/vacancies',
+        sql: `INSERT INTO vacancies (
+  title, department, location, type, experience_level,
+  salary_range, description, requirements, deadline, status, created_by
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+RETURNING *;`,
+      },
+      {
+        id: 'v-update',
+        title: 'Update Vacancy Details, Deadline & Reopen',
+        type: 'UPDATE',
+        purpose: 'Edits job parameters, extends deadline, or reopens closed vacancies.',
+        codeLocation: 'server.ts -> PATCH /api/vacancies/:id',
+        sql: `UPDATE vacancies
+SET title = COALESCE($1, title),
+    department = COALESCE($2, department),
+    deadline = $3,
+    status = COALESCE($4, status),
+    updated_at = NOW()
+WHERE id = $5
+RETURNING *;`,
+      },
+      {
+        id: 'v-delete',
+        title: 'Delete Vacancy',
+        type: 'DELETE',
+        purpose: 'Permanently removes a vacancy after detaching dependent applications.',
+        codeLocation: 'server.ts -> DELETE /api/vacancies/:id',
+        sql: `DELETE FROM vacancies
+WHERE id = $1
+RETURNING id;`,
+      },
+    ],
+  },
+  applications: {
+    name: 'applications',
+    description: 'Stores candidate applications, pipeline hiring stages, verification score, and recruiter evaluations.',
+    schemaFile: 'src/db/schema.ts (lines 30-51)',
+    serverFile: 'server.ts (lines 850-1100, 1360-1440)',
+    columns: [
+      { name: 'id', type: 'uuid (Primary Key)', desc: 'Application identifier' },
+      { name: 'vacancy_id', type: 'uuid (FK -> vacancies.id)', desc: 'Applied position' },
+      { name: 'applicant_id', type: 'uuid (FK -> users.id)', desc: 'Applicant user ID' },
+      { name: 'applicant_name', type: 'varchar(255)', desc: 'Candidate full name' },
+      { name: 'status', type: 'varchar(50)', desc: "'Submitted' | 'Under Review' | 'Shortlisted' | 'Interview' | 'Accepted' | 'Rejected'" },
+      { name: 'verification_status', type: 'varchar(50)', desc: "'Pending' | 'In Progress' | 'Verified' | 'Flagged' | 'Rejected'" },
+      { name: 'verification_score', type: 'integer', desc: 'Credential score from 0 to 100' },
+      { name: 'recruiter_notes', type: 'text', desc: 'Internal notes and evaluation' },
+    ],
+    queries: [
+      {
+        id: 'a-select-joined',
+        title: 'Fetch Applications with Vacancy Details',
+        type: 'SELECT',
+        purpose: 'Joins applications with vacancies to display full candidate information and position context.',
+        codeLocation: 'server.ts -> GET /api/applications',
+        sql: `SELECT a.*, v.title as vacancy_title, v.department as vacancy_department
+FROM applications a
+JOIN vacancies v ON a.vacancy_id = v.id
+ORDER BY a.created_at DESC;`,
+      },
+      {
+        id: 'a-insert',
+        title: 'Submit Candidate Application',
+        type: 'INSERT',
+        purpose: 'Creates a candidate application linked to a vacancy.',
+        codeLocation: 'server.ts -> POST /api/applications',
+        sql: `INSERT INTO applications (
+  vacancy_id, applicant_id, applicant_name, applicant_email, applicant_phone,
+  department, cover_letter, portfolio_url, linkedin_url, status, verification_status
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Submitted', 'Pending')
+RETURNING *;`,
+      },
+      {
+        id: 'a-update-full',
+        title: 'Update Application Stage & Evaluation',
+        type: 'UPDATE',
+        purpose: 'Full edit of candidate stage, verification status, score, notes, and rating.',
+        codeLocation: 'server.ts -> PATCH /api/applications/:id',
+        sql: `UPDATE applications
+SET applicant_name = COALESCE($1, applicant_name),
+    status = COALESCE($2, status),
+    verification_status = COALESCE($3, verification_status),
+    verification_score = COALESCE($4, verification_score),
+    recruiter_notes = COALESCE($5, recruiter_notes),
+    updated_at = NOW()
+WHERE id = $6
+RETURNING *;`,
+      },
+      {
+        id: 'a-delete',
+        title: 'Delete Application & Cleanup Files',
+        type: 'DELETE',
+        purpose: 'Removes application after clearing attached documents and timeline logs.',
+        codeLocation: 'server.ts -> DELETE /api/applications/:id',
+        sql: `DELETE FROM applications
+WHERE id = $1
+RETURNING id;`,
+      },
+    ],
+  },
+  documents: {
+    name: 'documents',
+    description: 'Stores applicant uploaded credentials (resumes, degree certificates, IDs) and verification results.',
+    schemaFile: 'src/db/schema.ts (lines 53-70)',
+    serverFile: 'server.ts (lines 1445-1730)',
+    columns: [
+      { name: 'id', type: 'uuid (Primary Key)', desc: 'Document record identifier' },
+      { name: 'application_id', type: 'uuid (FK -> applications.id)', desc: 'Application document belongs to' },
+      { name: 'document_type', type: 'varchar(100)', desc: "'Resume' | 'Degree Certificate' | 'ID Proof' | 'Other'" },
+      { name: 'file_name', type: 'varchar(255)', desc: 'Name of uploaded file' },
+      { name: 'file_size', type: 'integer', desc: 'File size in bytes' },
+      { name: 'status', type: 'varchar(50)', desc: "'Pending' | 'Verified' | 'Flagged' | 'Rejected'" },
+      { name: 'automated_check_status', type: 'varchar(50)', desc: "'Passed' | 'Warning' | 'Failed'" },
+    ],
+    queries: [
+      {
+        id: 'd-select-all',
+        title: 'List All Documents in Registry',
+        type: 'SELECT',
+        purpose: 'System Admin & HR view all candidate files with applicant and position context.',
+        codeLocation: 'server.ts -> GET /api/documents',
+        sql: `SELECT d.*, a.applicant_name, a.applicant_email, v.title as vacancy_title
+FROM documents d
+JOIN applications a ON d.application_id = a.id
+JOIN vacancies v ON a.vacancy_id = v.id
+ORDER BY d.created_at DESC;`,
+      },
+      {
+        id: 'd-update-verify',
+        title: 'Verify or Flag Document',
+        type: 'UPDATE',
+        purpose: 'Updates verification status, notes, and reviewer ID.',
+        codeLocation: 'server.ts -> POST /api/documents/:id/verify',
+        sql: `UPDATE documents
+SET status = $1,
+    verification_comment = $2,
+    verified_by = $3,
+    verified_at = NOW()
+WHERE id = $4
+RETURNING *;`,
+      },
+      {
+        id: 'd-delete',
+        title: 'Delete Document',
+        type: 'DELETE',
+        purpose: 'Deletes document file from database registry.',
+        codeLocation: 'server.ts -> DELETE /api/documents/:id',
+        sql: `DELETE FROM documents
+WHERE id = $1
+RETURNING id;`,
+      },
+    ],
+  },
+  application_timeline: {
+    name: 'application_timeline',
+    description: 'Audit logs tracking stage transitions, evaluations, document verifications, and actors.',
+    schemaFile: 'src/db/schema.ts (lines 72-79)',
+    serverFile: 'server.ts (lines 1425-1433, 1612-1622, 1762-1770)',
+    columns: [
+      { name: 'id', type: 'uuid (Primary Key)', desc: 'Log identifier' },
+      { name: 'application_id', type: 'uuid (FK -> applications.id)', desc: 'Application event belongs to' },
+      { name: 'status', type: 'varchar(100)', desc: 'Event status or action' },
+      { name: 'actor_name', type: 'varchar(255)', desc: 'User who performed the action' },
+      { name: 'comment', type: 'text', desc: 'Audit notes' },
+      { name: 'created_at', type: 'timestamp', desc: 'Event timestamp' },
+    ],
+    queries: [
+      {
+        id: 't-select-recent',
+        title: 'Fetch Recent Audit Activity Timeline',
+        type: 'SELECT',
+        purpose: 'Fetches recent timeline events for candidate tracking and recruiter activity feed.',
+        codeLocation: 'server.ts -> GET /api/recruiter/metrics',
+        sql: `SELECT t.id, t.application_id, t.status, t.actor_name, t.comment, t.created_at,
+       a.applicant_name, v.title as vacancy_title
+FROM application_timeline t
+JOIN applications a ON t.application_id = a.id
+JOIN vacancies v ON a.vacancy_id = v.id
+ORDER BY t.created_at DESC
+LIMIT 15;`,
+      },
+      {
+        id: 't-insert',
+        title: 'Record Audit Log Event',
+        type: 'INSERT',
+        purpose: 'Appends a new timeline milestone whenever status changes.',
+        codeLocation: 'server.ts -> helper queries',
+        sql: `INSERT INTO application_timeline (application_id, status, actor_name, comment)
+VALUES ($1, $2, $3, $4)
+RETURNING *;`,
+      },
+    ],
+  },
+};
+
 interface SystemAdminDashboardProps {
   currentUser: User;
   onLogout: () => void;
@@ -102,12 +455,85 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
   const [appDeptFilter, setAppDeptFilter] = useState('All');
   const [vacSearch, setVacSearch] = useState('');
   const [vacDeptFilter, setVacDeptFilter] = useState('All');
+  const [vacVisibilityFilter, setVacVisibilityFilter] = useState<'All' | 'active' | 'closed'>('All');
   const [docSearch, setDocSearch] = useState('');
   const [docStatusFilter, setDocStatusFilter] = useState('All');
 
   // Master Database Explorer table selector
   const [selectedDbTable, setSelectedDbTable] = useState<'users' | 'vacancies' | 'applications' | 'documents'>('users');
   const [rawRecordModal, setRawRecordModal] = useState<{ title: string; data: any } | null>(null);
+
+  // SQL Query Runner, Schema & Supabase Migration states
+  const [dbSubView, setDbSubView] = useState<'tables' | 'query_reference' | 'sql_console' | 'supabase_migration'>('tables');
+  const [sqlConsoleInput, setSqlConsoleInput] = useState<string>('SELECT id, full_name, email, role, created_at FROM users ORDER BY created_at DESC LIMIT 10;');
+  const [sqlQueryResult, setSqlQueryResult] = useState<any | null>(null);
+  const [sqlRunning, setSqlRunning] = useState(false);
+  const [sqlError, setSqlError] = useState<string | null>(null);
+  const [copiedQueryId, setCopiedQueryId] = useState<string | null>(null);
+
+  // Supabase Migration Hub states
+  const [supabaseMigrationSql, setSupabaseMigrationSql] = useState<string>('');
+  const [loadingMigrationSql, setLoadingMigrationSql] = useState(false);
+  const [copiedMigrationSql, setCopiedMigrationSql] = useState(false);
+  const [testConnectionString, setTestConnectionString] = useState('');
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [connectionTestResult, setConnectionTestResult] = useState<any | null>(null);
+  const [connectionTestError, setConnectionTestError] = useState<string | null>(null);
+
+  const loadSupabaseMigration = async () => {
+    setLoadingMigrationSql(true);
+    try {
+      const res = await api.getSupabaseMigrationSql();
+      if (res && res.sql) {
+        setSupabaseMigrationSql(res.sql);
+      }
+    } catch (err) {
+      console.warn('Failed to load migration SQL:', err);
+    } finally {
+      setLoadingMigrationSql(false);
+    }
+  };
+
+  const handleTestConnection = async () => {
+    if (!testConnectionString.trim()) return;
+    setTestingConnection(true);
+    setConnectionTestError(null);
+    setConnectionTestResult(null);
+    try {
+      const res = await api.testDatabaseConnection(testConnectionString);
+      if (res && res.ok) {
+        setConnectionTestResult(res);
+      } else {
+        setConnectionTestError(res?.error || 'Connection test failed');
+      }
+    } catch (err: any) {
+      setConnectionTestError(err.message || 'Connection test failed');
+    } finally {
+      setTestingConnection(false);
+    }
+  };
+
+  const handleExecuteSql = async (queryToRun?: string) => {
+    const sql = queryToRun || sqlConsoleInput;
+    if (!sql.trim()) return;
+    setSqlRunning(true);
+    setSqlError(null);
+    try {
+      const res = await api.runSqlQuery(sql);
+      if (res && res.error) {
+        setSqlError(res.error);
+        setSqlQueryResult(null);
+      } else {
+        setSqlQueryResult(res);
+        setSqlError(null);
+      }
+    } catch (err: any) {
+      setSqlError(err.message || 'Execution failed');
+      setSqlQueryResult(null);
+    } finally {
+      setSqlRunning(false);
+    }
+  };
 
   // Modals & sub-modals
   const [showCreateStaffModal, setShowCreateStaffModal] = useState(false);
@@ -125,6 +551,7 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
   const [resettingUser, setResettingUser] = useState<User | null>(null);
   const [newPasswordVal, setNewPasswordVal] = useState('');
   const [resetLoading, setResetLoading] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // Edit Vacancy modal state
   const [editingVacancy, setEditingVacancy] = useState<Vacancy | null>(null);
@@ -134,6 +561,10 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
   const [editType, setEditType] = useState('Full-time');
   const [editExpLevel, setEditExpLevel] = useState('Mid-Level');
   const [editSalary, setEditSalary] = useState('');
+  const [editMinSalary, setEditMinSalary] = useState('');
+  const [editMaxSalary, setEditMaxSalary] = useState('');
+  const [editIsNegotiable, setEditIsNegotiable] = useState(true);
+  const [editNegotiationNotes, setEditNegotiationNotes] = useState('');
   const [editDeadline, setEditDeadline] = useState('');
   const [editStatus, setEditStatus] = useState<'Open' | 'Closed'>('Open');
   const [editDescription, setEditDescription] = useState('');
@@ -146,6 +577,11 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
   const [editAppEmail, setEditAppEmail] = useState('');
   const [editAppPhone, setEditAppPhone] = useState('');
   const [editAppDept, setEditAppDept] = useState('');
+  const [editExpectedSalary, setEditExpectedSalary] = useState('');
+  const [editIsSalaryNegotiable, setEditIsSalaryNegotiable] = useState(true);
+  const [editSalaryPref, setEditSalaryPref] = useState('Negotiable');
+  const [editNoticePeriod, setEditNoticePeriod] = useState('1 Month');
+  const [editEmploymentStatus, setEditEmploymentStatus] = useState('Active Candidate');
   const [editAppStatus, setEditAppStatus] = useState('Submitted');
   const [editAppVerifStatus, setEditAppVerifStatus] = useState('Pending');
   const [editAppVerifScore, setEditAppVerifScore] = useState(75);
@@ -184,7 +620,7 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
     try {
       const [usersData, vacsData, appsData, docsData] = await Promise.all([
         api.getUsers({ role: roleFilter !== 'All' ? roleFilter : undefined, search: searchQuery || undefined }),
-        api.getVacancies(),
+        api.getVacancies({ includeExpired: true }),
         api.getApplications(),
         api.getAllDocuments(),
       ]);
@@ -293,10 +729,25 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
 
   // Vacancy Actions
   const handleToggleVacancyStatus = async (vac: Vacancy) => {
-    const nextStatus = vac.status === 'Open' ? 'Closed' : 'Open';
+    const isClosedOrExpired = isVacancyClosed(vac);
+    const nextStatus = isClosedOrExpired ? 'Open' : 'Closed';
+    const updatePayload: any = { status: nextStatus };
+
+    // If reopening a vacancy that was expired, renew deadline for 30 days so it appears on public portal
+    if (nextStatus === 'Open' && vac.deadline && new Date(vac.deadline).getTime() < Date.now()) {
+      const renewedDate = new Date();
+      renewedDate.setDate(renewedDate.getDate() + 30);
+      updatePayload.deadline = renewedDate.toISOString();
+    }
+
     try {
-      await api.updateVacancy(vac.id, { status: nextStatus });
-      setStatusMessage({ text: `Vacancy "${vac.title}" is now marked as ${nextStatus}.`, type: 'success' });
+      await api.updateVacancy(vac.id, updatePayload);
+      setStatusMessage({
+        text: nextStatus === 'Open'
+          ? `Vacancy "${vac.title}" reopened and published to public portal (deadline extended 30 days).`
+          : `Vacancy "${vac.title}" closed and safely archived to database.`,
+        type: 'success',
+      });
       loadData();
     } catch (err: any) {
       setStatusMessage({ text: err.message || 'Failed to update vacancy status', type: 'error' });
@@ -311,6 +762,10 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
     setEditType(vac.type);
     setEditExpLevel(vac.experienceLevel);
     setEditSalary(vac.salaryRange || '');
+    setEditMinSalary(vac.minSalary ? String(vac.minSalary) : '');
+    setEditMaxSalary(vac.maxSalary ? String(vac.maxSalary) : '');
+    setEditIsNegotiable(vac.isNegotiable !== false);
+    setEditNegotiationNotes(vac.negotiationNotes || '');
     setEditDeadline(vac.deadline ? new Date(vac.deadline).toISOString().split('T')[0] : '');
     setEditStatus(vac.status === 'Closed' ? 'Closed' : 'Open');
     setEditDescription(vac.description);
@@ -321,6 +776,14 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
     e.preventDefault();
     if (!editingVacancy) return;
     setEditVacLoading(true);
+
+    let finalSalaryRange = editSalary.trim();
+    if (editMinSalary && editMaxSalary) {
+      finalSalaryRange = `${Number(editMinSalary).toLocaleString()} - ${Number(editMaxSalary).toLocaleString()} ETB / month${editIsNegotiable ? ' (Negotiable)' : ''}`;
+    } else if (editIsNegotiable && finalSalaryRange && !finalSalaryRange.toLowerCase().includes('negotiable')) {
+      finalSalaryRange = `${finalSalaryRange} (Negotiable)`;
+    }
+
     try {
       await api.updateVacancy(editingVacancy.id, {
         title: editTitle.trim(),
@@ -328,7 +791,11 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
         location: editLocation.trim(),
         type: editType,
         experienceLevel: editExpLevel,
-        salaryRange: editSalary ? editSalary.trim() : undefined,
+        salaryRange: finalSalaryRange || undefined,
+        minSalary: editMinSalary ? parseInt(editMinSalary, 10) : undefined,
+        maxSalary: editMaxSalary ? parseInt(editMaxSalary, 10) : undefined,
+        isNegotiable: editIsNegotiable,
+        negotiationNotes: editNegotiationNotes.trim() || undefined,
         deadline: editDeadline ? new Date(editDeadline).toISOString() : undefined,
         status: editStatus,
         description: editDescription.trim(),
@@ -370,6 +837,11 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
     setEditAppEmail(app.applicantEmail);
     setEditAppPhone(app.applicantPhone);
     setEditAppDept(app.department || app.vacancyDepartment || 'Technology & IT');
+    setEditExpectedSalary(app.expectedSalary || '');
+    setEditIsSalaryNegotiable(app.isSalaryNegotiable !== false);
+    setEditSalaryPref(app.salaryNegotiationPreference || 'Negotiable');
+    setEditNoticePeriod(app.noticePeriod || '1 Month');
+    setEditEmploymentStatus(app.employmentStatus || 'Active Candidate');
     setEditAppStatus(app.status);
     setEditAppVerifStatus(app.verificationStatus);
     setEditAppVerifScore(app.verificationScore ?? 75);
@@ -388,6 +860,11 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
         applicantEmail: editAppEmail.trim(),
         applicantPhone: editAppPhone.trim(),
         department: editAppDept,
+        expectedSalary: editExpectedSalary.trim() || undefined,
+        isSalaryNegotiable: editIsSalaryNegotiable,
+        salaryNegotiationPreference: editSalaryPref,
+        noticePeriod: editNoticePeriod,
+        employmentStatus: editEmploymentStatus,
         status: editAppStatus as any,
         verificationStatus: editAppVerifStatus as any,
         verificationScore: Number(editAppVerifScore),
@@ -593,7 +1070,11 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
             <Briefcase className="h-4 w-4 text-purple-600" />
           </div>
           <div className="mt-2 text-2xl font-black text-slate-900">{vacancies.length}</div>
-          <p className="text-[10px] text-slate-500 mt-0.5">Published Job Postings</p>
+          <p className="text-[10px] text-slate-500 mt-0.5">
+            <span className="text-emerald-700 font-semibold">{vacancies.filter((v) => !isVacancyClosed(v)).length} Active Public</span>
+            {' • '}
+            <span className="text-amber-700 font-semibold">{vacancies.filter((v) => isVacancyClosed(v)).length} Closed in DB</span>
+          </p>
         </div>
 
         <div
@@ -746,12 +1227,36 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  users.map((u) => (
-                    <tr key={u.id} className="hover:bg-slate-50/70 transition">
-                      <td className="px-4 py-3">
-                        <div className="font-bold text-slate-900">{u.fullName}</div>
-                        <div className="text-[10px] text-slate-400 font-mono">{u.id}</div>
-                      </td>
+                  users.map((u, idx) => {
+                    const seqPadded = String(idx + 1).padStart(2, '0');
+                    const code = `USR-${seqPadded}`;
+                    return (
+                      <tr key={u.id} className="hover:bg-slate-50/70 transition">
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-2">
+                            <span className="rounded-md bg-purple-100 text-purple-900 font-mono font-bold text-xs px-2 py-0.5">
+                              #{seqPadded}
+                            </span>
+                            <span className="font-bold text-slate-900">{u.fullName}</span>
+                          </div>
+                          <div className="mt-1 flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
+                            <span className="text-purple-700 font-semibold">{code}</span>
+                            <span>•</span>
+                            <span className="truncate max-w-[140px]">{u.id}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(u.id);
+                                setCopiedId(u.id);
+                                setTimeout(() => setCopiedId(null), 1500);
+                              }}
+                              className="text-slate-400 hover:text-slate-700 transition p-0.5 rounded"
+                              title={`Copy UUID: ${u.id}`}
+                            >
+                              {copiedId === u.id ? <Check className="h-3 w-3 text-emerald-600 inline" /> : <Copy className="h-3 w-3 inline" />}
+                            </button>
+                          </div>
+                        </td>
                       <td className="px-4 py-3 font-mono text-slate-700">{u.email}</td>
                       <td className="px-4 py-3">
                         <span
@@ -811,8 +1316,9 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                         </div>
                       </td>
                     </tr>
-                  ))
-                )}
+                  );
+                })
+              )}
               </tbody>
             </table>
           </div>
@@ -824,9 +1330,9 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
         <div className="space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <h3 className="text-sm font-bold text-slate-900">Live Vacancies in Database</h3>
+              <h3 className="text-sm font-bold text-slate-900">Live Vacancies in Database ({vacancies.length} Total Records)</h3>
               <p className="text-xs text-slate-500">
-                Create, inspect, modify salaries, requirements, deadlines, or open/close positions.
+                Vacancies with expired deadlines or closed status are removed from public candidate pages but stored permanently here in the admin database.
               </p>
             </div>
             <button
@@ -851,6 +1357,19 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
             </div>
 
             <div className="flex items-center gap-1.5">
+              <span className="font-semibold text-slate-600">Portal Visibility:</span>
+              <select
+                value={vacVisibilityFilter}
+                onChange={(e) => setVacVisibilityFilter(e.target.value as any)}
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 focus:border-purple-600 focus:outline-none"
+              >
+                <option value="All">All in Database ({vacancies.length})</option>
+                <option value="active">Active Public Portal Only ({vacancies.filter((v) => !isVacancyClosed(v)).length})</option>
+                <option value="closed">Deadline Closed / Stored in DB ({vacancies.filter((v) => isVacancyClosed(v)).length})</option>
+              </select>
+            </div>
+
+            <div className="flex items-center gap-1.5">
               <span className="font-semibold text-slate-600">Department:</span>
               <select
                 value={vacDeptFilter}
@@ -870,6 +1389,8 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {vacancies
               .filter((v) => {
+                if (vacVisibilityFilter === 'active' && isVacancyClosed(v)) return false;
+                if (vacVisibilityFilter === 'closed' && !isVacancyClosed(v)) return false;
                 if (vacDeptFilter !== 'All' && v.department !== vacDeptFilter) return false;
                 if (vacSearch) {
                   const q = vacSearch.toLowerCase();
@@ -881,63 +1402,93 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                 }
                 return true;
               })
-              .map((v) => (
-                <div key={v.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs flex flex-col justify-between">
-                  <div>
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <span className="rounded-md bg-purple-50 px-2 py-0.5 text-[10px] font-bold text-purple-700 border border-purple-200">
-                          {v.department}
-                        </span>
-                        <h4 className="mt-1.5 text-base font-bold text-slate-900">{v.title}</h4>
-                        <p className="text-xs text-slate-500">{v.location} • {v.type}</p>
+              .map((v, idx) => {
+                const closed = isVacancyClosed(v);
+                const seqPadded = v.seqId || String(idx + 1).padStart(2, '0');
+                const code = v.jobCode || `VAC-${seqPadded}`;
+                return (
+                  <div key={v.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="rounded-md bg-purple-900 px-2 py-0.5 text-[11px] font-mono font-bold text-white shadow-2xs">
+                              #{seqPadded} ({code})
+                            </span>
+                            <span className="rounded-md bg-purple-50 px-2 py-0.5 text-[10px] font-bold text-purple-700 border border-purple-200">
+                              {v.department}
+                            </span>
+                          </div>
+                          <h4 className="mt-1.5 text-base font-bold text-slate-900">{v.title}</h4>
+                          <p className="text-xs text-slate-500">{v.location} • {v.type}</p>
+                        </div>
+                        <div className="flex flex-col items-end gap-1">
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[10px] font-bold border ${
+                              v.status === 'Open'
+                                ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                : 'bg-slate-100 text-slate-700 border-slate-300'
+                            }`}
+                          >
+                            {v.status}
+                          </span>
+                          {closed ? (
+                            <span className="rounded-md bg-amber-50 px-2 py-0.5 text-[9px] font-bold text-amber-800 border border-amber-200">
+                              Deadline Closed (Stored in DB)
+                            </span>
+                          ) : (
+                            <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[9px] font-bold text-emerald-800 border border-emerald-200">
+                              Active Public Portal
+                            </span>
+                          )}
+                        </div>
                       </div>
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-[10px] font-bold border ${
-                          v.status === 'Open'
-                            ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                            : 'bg-slate-100 text-slate-700 border-slate-300'
+
+                      <p className="mt-3 text-xs text-slate-600 line-clamp-3">{v.description}</p>
+
+                      <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-500">
+                        <div>
+                          <span className="font-semibold text-emerald-800">{v.salaryRange || 'Competitive ETB'}</span>
+                          <span className={`ml-2 inline-block rounded px-1.5 py-0.2 text-[9px] font-bold ${
+                            v.isNegotiable !== false
+                              ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                              : 'bg-slate-100 text-slate-600 border border-slate-200'
+                          }`}>
+                            {v.isNegotiable !== false ? '✓ Negotiable' : 'Fixed'}
+                          </span>
+                        </div>
+                        <span>{v.applicantCount || 0} Applicants</span>
+                      </div>
+
+                      <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-2 text-[11px]">
+                        <span className="flex items-center gap-1.5 text-slate-600 font-medium">
+                          <Calendar className="h-3.5 w-3.5 text-purple-700 shrink-0" />
+                          <span>Deadline: <strong className="text-slate-900 font-bold">{formatDeadline(v.deadline)}</strong></span>
+                        </span>
+                        {getDeadlineBadge(v.deadline)}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 flex flex-wrap items-center justify-end gap-1.5 border-t border-slate-100 pt-3 text-xs">
+                      <button
+                        onClick={() => handleToggleVacancyStatus(v)}
+                        className={`flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-bold transition border ${
+                          closed
+                            ? 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                            : 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100'
                         }`}
+                        title={closed ? 'Reopen and extend deadline by 30 days to publish to public portal' : 'Close and archive in database'}
                       >
-                        {v.status}
-                      </span>
-                    </div>
+                        {closed ? 'Reopen / Extend (30d)' : 'Close'}
+                      </button>
 
-                    <p className="mt-3 text-xs text-slate-600 line-clamp-3">{v.description}</p>
-
-                    <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-500">
-                      <span className="font-semibold text-emerald-800">{v.salaryRange || 'Competitive ETB'}</span>
-                      <span>{v.applicantCount || 0} Applicants</span>
-                    </div>
-
-                    <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-2 text-[11px]">
-                      <span className="flex items-center gap-1.5 text-slate-600 font-medium">
-                        <Calendar className="h-3.5 w-3.5 text-purple-700 shrink-0" />
-                        <span>Deadline: <strong className="text-slate-900 font-bold">{formatDeadline(v.deadline)}</strong></span>
-                      </span>
-                      {getDeadlineBadge(v.deadline)}
-                    </div>
-                  </div>
-
-                  <div className="mt-4 flex flex-wrap items-center justify-end gap-1.5 border-t border-slate-100 pt-3 text-xs">
-                    <button
-                      onClick={() => handleToggleVacancyStatus(v)}
-                      className={`flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-bold transition border ${
-                        v.status === 'Open'
-                          ? 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100'
-                          : 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
-                      }`}
-                    >
-                      {v.status === 'Open' ? 'Close' : 'Reopen'}
-                    </button>
-
-                    <button
-                      onClick={() => handleStartEditVacancy(v)}
-                      className="flex items-center gap-1 rounded-lg border border-purple-200 bg-purple-50 px-2.5 py-1 text-xs font-bold text-purple-800 hover:bg-purple-100 transition"
-                    >
-                      <Edit className="h-3.5 w-3.5" />
-                      <span>Edit</span>
-                    </button>
+                      <button
+                        onClick={() => handleStartEditVacancy(v)}
+                        className="flex items-center gap-1 rounded-lg border border-purple-200 bg-purple-50 px-2.5 py-1 text-xs font-bold text-purple-800 hover:bg-purple-100 transition"
+                      >
+                        <Edit className="h-3.5 w-3.5" />
+                        <span>Edit</span>
+                      </button>
 
                     <button
                       onClick={() => setRawRecordModal({ title: `Raw Database Record: Vacancy (${v.title})`, data: v })}
@@ -956,7 +1507,8 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                     </button>
                   </div>
                 </div>
-              ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -1036,12 +1588,35 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  filteredApplications.map((app) => (
-                    <tr key={app.id} className="hover:bg-slate-50/70 transition">
-                      <td className="px-4 py-3.5">
-                        <div className="font-bold text-slate-900">{app.applicantName}</div>
-                        <div className="text-[11px] text-slate-500">{app.applicantEmail} • {app.applicantPhone}</div>
-                      </td>
+                  filteredApplications.map((app, idx) => {
+                    const seqPadded = app.seqId || String(idx + 1).padStart(2, '0');
+                    const code = app.appCode || `APP-${seqPadded}`;
+                    return (
+                      <tr key={app.id} className="hover:bg-slate-50/70 transition">
+                        <td className="px-4 py-3.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className="rounded bg-purple-100 text-purple-900 font-mono font-bold text-[11px] px-2 py-0.5 shadow-2xs">
+                              #{seqPadded} ({code})
+                            </span>
+                            <span className="font-bold text-slate-900">{app.applicantName}</span>
+                          </div>
+                          <div className="text-[11px] text-slate-500 mt-1">{app.applicantEmail} • {app.applicantPhone}</div>
+                          {app.expectedSalary && (
+                            <div className="mt-1 flex items-center gap-1.5 text-[10px]">
+                              <span className="font-bold text-emerald-800">Salary: {app.expectedSalary}</span>
+                              <span className={`rounded px-1.5 py-0.2 text-[9px] font-bold ${
+                                app.isSalaryNegotiable !== false
+                                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                  : 'bg-slate-100 text-slate-600 border border-slate-200'
+                              }`}>
+                                {app.salaryNegotiationPreference || (app.isSalaryNegotiable !== false ? 'Negotiable' : 'Fixed')}
+                              </span>
+                              {app.noticePeriod && (
+                                <span className="text-slate-400">• {app.noticePeriod}</span>
+                              )}
+                            </div>
+                          )}
+                        </td>
                       <td className="px-4 py-3.5">
                         <div className="font-bold text-slate-800">{app.vacancyTitle}</div>
                         <div className="text-[11px] text-emerald-700 font-medium">{app.department || app.vacancyDepartment}</div>
@@ -1105,8 +1680,9 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                         </div>
                       </td>
                     </tr>
-                  ))
-                )}
+                  );
+                })
+              )}
               </tbody>
             </table>
           </div>
@@ -1252,29 +1828,126 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
         </div>
       )}
 
-      {/* ---------------- Tab 5: Master Database Explorer ---------------- */}
+      {/* ---------------- Tab 5: Master Database Explorer & SQL Runner ---------------- */}
       {activeTab === 'database' && (
         <div className="space-y-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <h3 className="text-base font-bold text-slate-900">Direct Master Database Explorer</h3>
-              <p className="text-xs text-slate-500">
-                Inspect raw database records across all tables and execute database synchronization.
-              </p>
+          {/* Database System Architecture Banner */}
+          <div className="rounded-3xl border border-purple-200 bg-linear-to-r from-purple-950 via-slate-900 to-emerald-950 p-6 md:p-8 text-white shadow-xl">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-start gap-4">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-500/20 text-emerald-300 border border-emerald-400/30">
+                  <Server className="h-6 w-6" />
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-xl font-black tracking-tight">PostgreSQL Relational Database</h3>
+                    <span className="rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-[11px] font-bold text-emerald-300 border border-emerald-400/30">
+                      Cloud SQL Ready • Drizzle ORM
+                    </span>
+                    <span className="rounded-full bg-purple-500/20 px-2.5 py-0.5 text-[11px] font-bold text-purple-300 border border-purple-400/30">
+                      Port 5432 • pg.Pool
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-300 mt-1 max-w-2xl">
+                    Primary relational database for <strong>Vacancy</strong>. Schemas defined in <code className="text-emerald-300">src/db/schema.ts</code>, queries managed in <code className="text-emerald-300">server.ts</code>.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleSyncHealth}
+                  disabled={syncLoading}
+                  className="flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-xs hover:bg-emerald-500 transition disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-4 w-4 ${syncLoading ? 'animate-spin' : ''}`} />
+                  <span>{syncLoading ? 'Synchronizing...' : 'Run Database Sync & Repair'}</span>
+                </button>
+              </div>
             </div>
 
-            <button
-              onClick={handleSyncHealth}
-              disabled={syncLoading}
-              className="flex items-center gap-1.5 rounded-xl bg-emerald-700 px-4 py-2 text-xs font-bold text-white shadow-xs hover:bg-emerald-800 transition disabled:opacity-50"
-            >
-              <RefreshCw className={`h-4 w-4 ${syncLoading ? 'animate-spin' : ''}`} />
-              <span>{syncLoading ? 'Synchronizing...' : 'Run Database Sync & Repair'}</span>
-            </button>
+            {/* Quick Metrics Bar */}
+            <div className="mt-6 grid grid-cols-2 sm:grid-cols-4 gap-3 pt-4 border-t border-white/10 text-xs">
+              <div className="rounded-xl bg-white/5 p-3 border border-white/10">
+                <div className="text-slate-400 font-semibold">Table: users</div>
+                <div className="text-lg font-bold text-white mt-0.5">{users.length} accounts</div>
+              </div>
+              <div className="rounded-xl bg-white/5 p-3 border border-white/10">
+                <div className="text-slate-400 font-semibold">Table: vacancies</div>
+                <div className="text-lg font-bold text-white mt-0.5">{vacancies.length} positions</div>
+              </div>
+              <div className="rounded-xl bg-white/5 p-3 border border-white/10">
+                <div className="text-slate-400 font-semibold">Table: applications</div>
+                <div className="text-lg font-bold text-white mt-0.5">{applications.length} candidates</div>
+              </div>
+              <div className="rounded-xl bg-white/5 p-3 border border-white/10">
+                <div className="text-slate-400 font-semibold">Table: documents</div>
+                <div className="text-lg font-bold text-white mt-0.5">{documents.length} files</div>
+              </div>
+            </div>
           </div>
 
-          {/* Table Selector Bar */}
-          <div className="flex flex-wrap gap-2 text-xs font-bold">
+          {/* Sub-Navigation Switcher */}
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setDbSubView('tables')}
+                className={`flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-bold transition ${
+                  dbSubView === 'tables'
+                    ? 'bg-purple-900 text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                <Table className="h-4 w-4" />
+                <span>Live Table Records</span>
+              </button>
+
+              <button
+                onClick={() => setDbSubView('query_reference')}
+                className={`flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-bold transition ${
+                  dbSubView === 'query_reference'
+                    ? 'bg-purple-900 text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                <Code className="h-4 w-4" />
+                <span>SQL Queries of Each Table</span>
+              </button>
+
+              <button
+                onClick={() => setDbSubView('sql_console')}
+                className={`flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-bold transition ${
+                  dbSubView === 'sql_console'
+                    ? 'bg-emerald-700 text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                <Terminal className="h-4 w-4" />
+                <span>Interactive SQL Query Runner</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setDbSubView('supabase_migration');
+                  loadSupabaseMigration();
+                }}
+                className={`flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-bold transition ${
+                  dbSubView === 'supabase_migration'
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100'
+                }`}
+              >
+                <Server className="h-4 w-4" />
+                <span>⚡ Convert to Supabase</span>
+              </button>
+            </div>
+          </div>
+
+          {/* ---------------- Sub-View 1: Live Records Explorer ---------------- */}
+          {dbSubView === 'tables' && (
+            <div className="space-y-4">
+              {/* Table Selector Bar */}
+              <div className="flex flex-wrap gap-2 text-xs font-bold">
             <button
               onClick={() => setSelectedDbTable('users')}
               className={`flex items-center gap-1.5 rounded-xl px-3.5 py-2 transition ${
@@ -1322,7 +1995,7 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
               <thead className="border-b border-slate-200 bg-slate-50 text-slate-600 font-mono">
                 {selectedDbTable === 'users' ? (
                   <tr>
-                    <th className="px-4 py-3">id</th>
+                    <th className="px-4 py-3">id (seq 01, 02...)</th>
                     <th className="px-4 py-3">full_name</th>
                     <th className="px-4 py-3">email</th>
                     <th className="px-4 py-3">role</th>
@@ -1331,25 +2004,28 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                   </tr>
                 ) : selectedDbTable === 'vacancies' ? (
                   <tr>
-                    <th className="px-4 py-3">id</th>
+                    <th className="px-4 py-3">id (seq 01, 02...)</th>
                     <th className="px-4 py-3">title</th>
                     <th className="px-4 py-3">department</th>
+                    <th className="px-4 py-3">salary_budget & negotiations</th>
                     <th className="px-4 py-3">status</th>
                     <th className="px-4 py-3">deadline</th>
+                    <th className="px-4 py-3">portal_visibility</th>
                     <th className="px-4 py-3 text-right">actions</th>
                   </tr>
                 ) : selectedDbTable === 'applications' ? (
                   <tr>
-                    <th className="px-4 py-3">id</th>
+                    <th className="px-4 py-3">id (seq 01, 02...)</th>
                     <th className="px-4 py-3">applicant_name</th>
                     <th className="px-4 py-3">vacancy_title</th>
+                    <th className="px-4 py-3">expected_salary & negotiations</th>
                     <th className="px-4 py-3">status</th>
                     <th className="px-4 py-3">verification_score</th>
                     <th className="px-4 py-3 text-right">actions</th>
                   </tr>
                 ) : (
                   <tr>
-                    <th className="px-4 py-3">id</th>
+                    <th className="px-4 py-3">id (seq 01, 02...)</th>
                     <th className="px-4 py-3">file_name</th>
                     <th className="px-4 py-3">document_type</th>
                     <th className="px-4 py-3">status</th>
@@ -1360,117 +2036,847 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
               </thead>
               <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
                 {selectedDbTable === 'users' &&
-                  users.map((row) => (
-                    <tr key={row.id} className="hover:bg-slate-50/80">
-                      <td className="px-4 py-3 text-slate-400 font-bold">{row.id}</td>
-                      <td className="px-4 py-3 font-sans font-bold text-slate-900">{row.fullName}</td>
-                      <td className="px-4 py-3 text-slate-700">{row.email}</td>
-                      <td className="px-4 py-3 font-sans font-semibold text-purple-700">{row.role}</td>
-                      <td className="px-4 py-3 text-slate-400">{row.createdAt ? new Date(row.createdAt).toLocaleDateString() : 'N/A'}</td>
-                      <td className="px-4 py-3 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            onClick={() => handleStartEditUser(row)}
-                            className="rounded bg-purple-50 px-2 py-1 font-sans text-purple-700 hover:bg-purple-100"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => setRawRecordModal({ title: `Record users [${row.id}]`, data: row })}
-                            className="rounded bg-slate-100 px-2 py-1 text-slate-700 hover:bg-slate-200"
-                          >
-                            JSON
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                  users.map((row, idx) => {
+                    const seqPadded = String(idx + 1).padStart(2, '0');
+                    const code = `USR-${seqPadded}`;
+                    return (
+                      <tr key={row.id} className="hover:bg-slate-50/80">
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1.5 font-mono">
+                            <span className="inline-flex items-center rounded-md bg-purple-100 text-purple-900 font-bold px-2 py-0.5 text-xs">
+                              {seqPadded}
+                            </span>
+                            <span className="text-[10px] text-purple-700 font-semibold font-mono">({code})</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(row.id);
+                                setCopiedId(row.id);
+                                setTimeout(() => setCopiedId(null), 1500);
+                              }}
+                              className="text-slate-400 hover:text-slate-700 p-0.5 rounded transition"
+                              title={`Copy UUID: ${row.id}`}
+                            >
+                              {copiedId === row.id ? (
+                                <Check className="h-3 w-3 text-emerald-600 inline" />
+                              ) : (
+                                <Copy className="h-3 w-3 inline" />
+                              )}
+                            </button>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 font-sans font-bold text-slate-900">{row.fullName}</td>
+                        <td className="px-4 py-3 text-slate-700">{row.email}</td>
+                        <td className="px-4 py-3 font-sans font-semibold text-purple-700">{row.role}</td>
+                        <td className="px-4 py-3 text-slate-400">{row.createdAt ? new Date(row.createdAt).toLocaleDateString() : 'N/A'}</td>
+                        <td className="px-4 py-3 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              onClick={() => handleStartEditUser(row)}
+                              className="rounded bg-purple-50 px-2 py-1 font-sans text-purple-700 hover:bg-purple-100"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => setRawRecordModal({ title: `Record users [${row.id}]`, data: row })}
+                              className="rounded bg-slate-100 px-2 py-1 text-slate-700 hover:bg-slate-200"
+                            >
+                              JSON
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
 
                 {selectedDbTable === 'vacancies' &&
-                  vacancies.map((row) => (
-                    <tr key={row.id} className="hover:bg-slate-50/80">
-                      <td className="px-4 py-3 text-slate-400 font-bold">{row.id}</td>
-                      <td className="px-4 py-3 font-sans font-bold text-slate-900">{row.title}</td>
-                      <td className="px-4 py-3 font-sans text-slate-700">{row.department}</td>
-                      <td className="px-4 py-3 font-sans font-bold text-emerald-700">{row.status}</td>
-                      <td className="px-4 py-3 text-slate-400">{formatDeadline(row.deadline)}</td>
-                      <td className="px-4 py-3 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            onClick={() => handleStartEditVacancy(row)}
-                            className="rounded bg-purple-50 px-2 py-1 font-sans text-purple-700 hover:bg-purple-100"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => setRawRecordModal({ title: `Record vacancies [${row.id}]`, data: row })}
-                            className="rounded bg-slate-100 px-2 py-1 text-slate-700 hover:bg-slate-200"
-                          >
-                            JSON
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                  vacancies.map((row, idx) => {
+                    const closed = isVacancyClosed(row);
+                    const seqPadded = row.seqId || String(idx + 1).padStart(2, '0');
+                    const code = row.jobCode || `VAC-${seqPadded}`;
+                    return (
+                      <tr key={row.id} className="hover:bg-slate-50/80">
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1.5 font-mono">
+                            <span className="inline-flex items-center rounded-md bg-emerald-100 text-emerald-900 font-bold px-2 py-0.5 text-xs">
+                              {seqPadded}
+                            </span>
+                            <span className="text-[10px] text-emerald-700 font-semibold font-mono">({code})</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(row.id);
+                                setCopiedId(row.id);
+                                setTimeout(() => setCopiedId(null), 1500);
+                              }}
+                              className="text-slate-400 hover:text-slate-700 p-0.5 rounded transition"
+                              title={`Copy UUID: ${row.id}`}
+                            >
+                              {copiedId === row.id ? (
+                                <Check className="h-3 w-3 text-emerald-600 inline" />
+                              ) : (
+                                <Copy className="h-3 w-3 inline" />
+                              )}
+                            </button>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 font-sans font-bold text-slate-900">{row.title}</td>
+                        <td className="px-4 py-3 font-sans text-slate-700">{row.department}</td>
+                        <td className="px-4 py-3 font-sans">
+                          <div className="font-semibold text-emerald-900 text-[11px]">{row.salaryRange || 'Competitive ETB'}</div>
+                          <span className={`inline-block mt-0.5 rounded px-1.5 py-0.2 text-[9px] font-bold ${
+                            row.isNegotiable !== false
+                              ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                              : 'bg-slate-100 text-slate-600 border border-slate-200'
+                          }`}>
+                            {row.isNegotiable !== false ? '✓ Negotiable' : 'Fixed Budget'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 font-sans font-bold text-slate-800">{row.status}</td>
+                        <td className="px-4 py-3 text-slate-400">{formatDeadline(row.deadline)}</td>
+                        <td className="px-4 py-3 font-sans">
+                          {closed ? (
+                            <span className="inline-block rounded-md bg-amber-50 border border-amber-200 px-2 py-0.5 text-[10px] font-bold text-amber-800">
+                              Deadline Closed (Stored in DB)
+                            </span>
+                          ) : (
+                            <span className="inline-block rounded-md bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
+                              Active Public Portal
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              onClick={() => handleStartEditVacancy(row)}
+                              className="rounded bg-purple-50 px-2 py-1 font-sans text-purple-700 hover:bg-purple-100"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => setRawRecordModal({ title: `Record vacancies [${row.id}]`, data: row })}
+                              className="rounded bg-slate-100 px-2 py-1 text-slate-700 hover:bg-slate-200"
+                            >
+                              JSON
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
 
                 {selectedDbTable === 'applications' &&
-                  applications.map((row) => (
-                    <tr key={row.id} className="hover:bg-slate-50/80">
-                      <td className="px-4 py-3 text-slate-400 font-bold">{row.id}</td>
-                      <td className="px-4 py-3 font-sans font-bold text-slate-900">{row.applicantName}</td>
-                      <td className="px-4 py-3 font-sans text-slate-700">{row.vacancyTitle}</td>
-                      <td className="px-4 py-3 font-sans font-bold text-emerald-700">{row.status}</td>
-                      <td className="px-4 py-3 text-slate-700">{row.verificationScore ?? 75}%</td>
-                      <td className="px-4 py-3 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            onClick={() => handleStartEditApplication(row)}
-                            className="rounded bg-purple-50 px-2 py-1 font-sans text-purple-700 hover:bg-purple-100"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => setRawRecordModal({ title: `Record applications [${row.id}]`, data: row })}
-                            className="rounded bg-slate-100 px-2 py-1 text-slate-700 hover:bg-slate-200"
-                          >
-                            JSON
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                  applications.map((row, idx) => {
+                    const seqPadded = row.seqId || String(idx + 1).padStart(2, '0');
+                    const code = row.appCode || `APP-${seqPadded}`;
+                    return (
+                      <tr key={row.id} className="hover:bg-slate-50/80">
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1.5 font-mono">
+                            <span className="inline-flex items-center rounded-md bg-blue-100 text-blue-900 font-bold px-2 py-0.5 text-xs">
+                              {seqPadded}
+                            </span>
+                            <span className="text-[10px] text-blue-700 font-semibold font-mono">({code})</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(row.id);
+                                setCopiedId(row.id);
+                                setTimeout(() => setCopiedId(null), 1500);
+                              }}
+                              className="text-slate-400 hover:text-slate-700 p-0.5 rounded transition"
+                              title={`Copy UUID: ${row.id}`}
+                            >
+                              {copiedId === row.id ? (
+                                <Check className="h-3 w-3 text-emerald-600 inline" />
+                              ) : (
+                                <Copy className="h-3 w-3 inline" />
+                              )}
+                            </button>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 font-sans font-bold text-slate-900">{row.applicantName}</td>
+                        <td className="px-4 py-3 font-sans text-slate-700">{row.vacancyTitle}</td>
+                        <td className="px-4 py-3 font-sans">
+                          <div className="font-bold text-emerald-900 text-[11px]">{row.expectedSalary || 'Negotiable (ETB)'}</div>
+                          <div className="flex items-center gap-1 mt-0.5">
+                            <span className={`rounded px-1.5 py-0.2 text-[9px] font-bold ${
+                              row.isSalaryNegotiable !== false
+                                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                : 'bg-slate-100 text-slate-600 border border-slate-200'
+                            }`}>
+                              {row.salaryNegotiationPreference || (row.isSalaryNegotiable !== false ? 'Negotiable' : 'Fixed')}
+                            </span>
+                            {row.noticePeriod && (
+                              <span className="text-[9px] text-slate-500 font-mono">• {row.noticePeriod}</span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 font-sans font-bold text-emerald-700">{row.status}</td>
+                        <td className="px-4 py-3 text-slate-700">{row.verificationScore ?? 75}%</td>
+                        <td className="px-4 py-3 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              onClick={() => handleStartEditApplication(row)}
+                              className="rounded bg-purple-50 px-2 py-1 font-sans text-purple-700 hover:bg-purple-100"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => setRawRecordModal({ title: `Record applications [${row.id}]`, data: row })}
+                              className="rounded bg-slate-100 px-2 py-1 text-slate-700 hover:bg-slate-200"
+                            >
+                              JSON
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
 
                 {selectedDbTable === 'documents' &&
-                  documents.map((row) => (
-                    <tr key={row.id} className="hover:bg-slate-50/80">
-                      <td className="px-4 py-3 text-slate-400 font-bold">{row.id}</td>
-                      <td className="px-4 py-3 font-sans font-bold text-slate-900">{row.file_name || row.fileName}</td>
-                      <td className="px-4 py-3 font-sans text-purple-700">{row.document_type || row.documentType}</td>
-                      <td className="px-4 py-3 font-sans font-bold text-emerald-700">{row.status}</td>
-                      <td className="px-4 py-3 font-sans text-slate-700">{row.applicant_name}</td>
-                      <td className="px-4 py-3 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            onClick={() => handleStartEditDocument(row)}
-                            className="rounded bg-purple-50 px-2 py-1 font-sans text-purple-700 hover:bg-purple-100"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => setRawRecordModal({ title: `Record documents [${row.id}]`, data: row })}
-                            className="rounded bg-slate-100 px-2 py-1 text-slate-700 hover:bg-slate-200"
-                          >
-                            JSON
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                  documents.map((row, idx) => {
+                    const seqPadded = String(idx + 1).padStart(2, '0');
+                    const code = `DOC-${seqPadded}`;
+                    return (
+                      <tr key={row.id} className="hover:bg-slate-50/80">
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1.5 font-mono">
+                            <span className="inline-flex items-center rounded-md bg-purple-100 text-purple-900 font-bold px-2 py-0.5 text-xs">
+                              {seqPadded}
+                            </span>
+                            <span className="text-[10px] text-purple-700 font-semibold font-mono">({code})</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(row.id);
+                                setCopiedId(row.id);
+                                setTimeout(() => setCopiedId(null), 1500);
+                              }}
+                              className="text-slate-400 hover:text-slate-700 p-0.5 rounded transition"
+                              title={`Copy UUID: ${row.id}`}
+                            >
+                              {copiedId === row.id ? (
+                                <Check className="h-3 w-3 text-emerald-600 inline" />
+                              ) : (
+                                <Copy className="h-3 w-3 inline" />
+                              )}
+                            </button>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 font-sans font-bold text-slate-900">{row.file_name || row.fileName}</td>
+                        <td className="px-4 py-3 font-sans text-purple-700">{row.document_type || row.documentType}</td>
+                        <td className="px-4 py-3 font-sans font-bold text-emerald-700">{row.status}</td>
+                        <td className="px-4 py-3 font-sans text-slate-700">{row.applicant_name}</td>
+                        <td className="px-4 py-3 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              onClick={() => handleStartEditDocument(row)}
+                              className="rounded bg-purple-50 px-2 py-1 font-sans text-purple-700 hover:bg-purple-100"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => setRawRecordModal({ title: `Record documents [${row.id}]`, data: row })}
+                              className="rounded bg-slate-100 px-2 py-1 text-slate-700 hover:bg-slate-200"
+                            >
+                              JSON
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
               </tbody>
             </table>
           </div>
         </div>
       )}
+
+      {/* ---------------- Sub-View 2: SQL Queries by Table ---------------- */}
+      {dbSubView === 'query_reference' && (
+        <div className="space-y-6">
+          {/* Table Selector */}
+          <div className="flex flex-wrap gap-2 text-xs font-bold">
+            {Object.keys(TABLE_QUERIES).map((tblKey) => (
+              <button
+                key={tblKey}
+                onClick={() => setSelectedDbTable(tblKey as any)}
+                className={`rounded-xl px-4 py-2 transition ${
+                  selectedDbTable === tblKey
+                    ? 'bg-purple-900 text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                Table: {tblKey} ({TABLE_QUERIES[tblKey].queries.length} queries)
+              </button>
+            ))}
+          </div>
+
+          {/* Table Schema Card */}
+          {TABLE_QUERIES[selectedDbTable] && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                <div>
+                  <h4 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                    <span>Schema for table:</span>
+                    <code className="rounded bg-purple-50 px-2 py-0.5 text-purple-900 font-mono text-sm">
+                      {TABLE_QUERIES[selectedDbTable].name}
+                    </code>
+                  </h4>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {TABLE_QUERIES[selectedDbTable].description}
+                  </p>
+                </div>
+
+                <div className="text-right text-[11px] text-slate-500 font-mono">
+                  <div>Defined in: <span className="font-semibold text-slate-800">{TABLE_QUERIES[selectedDbTable].schemaFile}</span></div>
+                  <div>Handlers in: <span className="font-semibold text-emerald-800">{TABLE_QUERIES[selectedDbTable].serverFile}</span></div>
+                </div>
+              </div>
+
+              {/* Columns Definition */}
+              <div>
+                <h5 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Column Definitions</h5>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                  {TABLE_QUERIES[selectedDbTable].columns.map((col, idx) => (
+                    <div key={idx} className="rounded-xl border border-slate-100 bg-slate-50/60 p-2.5 text-xs">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-mono font-bold text-slate-900">{col.name}</span>
+                        <span className="font-mono text-[10px] text-purple-700 font-semibold">{col.type}</span>
+                      </div>
+                      <div className="text-[11px] text-slate-500 mt-1">{col.desc}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Queries in this Table */}
+              <div className="pt-2">
+                <h5 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">
+                  Application Queries ({TABLE_QUERIES[selectedDbTable].queries.length})
+                </h5>
+
+                <div className="space-y-4">
+                  {TABLE_QUERIES[selectedDbTable].queries.map((q) => (
+                    <div key={q.id} className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`rounded px-2 py-0.5 text-[10px] font-black uppercase font-mono ${
+                              q.type === 'SELECT'
+                                ? 'bg-blue-100 text-blue-800 border border-blue-200'
+                                : q.type === 'INSERT'
+                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                : q.type === 'UPDATE'
+                                ? 'bg-purple-100 text-purple-800 border border-purple-200'
+                                : 'bg-rose-100 text-rose-800 border border-rose-200'
+                            }`}
+                          >
+                            {q.type}
+                          </span>
+                          <span className="font-bold text-slate-900 text-xs">{q.title}</span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] font-mono text-slate-500">{q.codeLocation}</span>
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(q.sql);
+                              setCopiedQueryId(q.id);
+                              setTimeout(() => setCopiedQueryId(null), 2000);
+                            }}
+                            className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 transition"
+                            title="Copy SQL"
+                          >
+                            {copiedQueryId === q.id ? (
+                              <>
+                                <Check className="h-3 w-3 text-emerald-600" />
+                                <span className="text-emerald-700">Copied!</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="h-3 w-3 text-slate-400" />
+                                <span>Copy</span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            onClick={() => {
+                              setSqlConsoleInput(q.sql);
+                              setDbSubView('sql_console');
+                              handleExecuteSql(q.sql);
+                            }}
+                            className="flex items-center gap-1 rounded-lg bg-emerald-700 px-3 py-1 text-[11px] font-bold text-white hover:bg-emerald-800 transition shadow-xs"
+                          >
+                            <Play className="h-3 w-3 fill-current" />
+                            <span>Run Live</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <p className="text-xs text-slate-600 mb-2">{q.purpose}</p>
+
+                      <div className="relative rounded-xl bg-slate-900 p-3 text-emerald-300 font-mono text-[11px] overflow-x-auto">
+                        <pre className="whitespace-pre-wrap">{q.sql}</pre>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ---------------- Sub-View 3: Interactive SQL Query Runner ---------------- */}
+      {dbSubView === 'sql_console' && (
+        <div className="space-y-5">
+          {/* Presets Header */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs">
+            <div className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+              Quick Query Presets (Click to Load & Run):
+            </div>
+            <div className="flex flex-wrap gap-2 text-xs">
+              <button
+                onClick={() => {
+                  const q = 'SELECT id, email, full_name, role, created_at FROM users ORDER BY created_at DESC LIMIT 10;';
+                  setSqlConsoleInput(q);
+                  handleExecuteSql(q);
+                }}
+                className="rounded-lg border border-purple-200 bg-purple-50 px-2.5 py-1.5 font-mono text-[11px] text-purple-900 hover:bg-purple-100 transition"
+              >
+                SELECT * FROM users
+              </button>
+
+              <button
+                onClick={() => {
+                  const q = "SELECT id, title, department, deadline, status FROM vacancies WHERE status = 'Open' AND (deadline IS NULL OR deadline >= NOW()) ORDER BY created_at DESC;";
+                  setSqlConsoleInput(q);
+                  handleExecuteSql(q);
+                }}
+                className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 font-mono text-[11px] text-emerald-900 hover:bg-emerald-100 transition"
+              >
+                Active Public Vacancies (Deadline &gt;= NOW)
+              </button>
+
+              <button
+                onClick={() => {
+                  const q = "SELECT id, title, department, deadline, status FROM vacancies WHERE status = 'Closed' OR (deadline IS NOT NULL AND deadline < NOW()) ORDER BY deadline DESC;";
+                  setSqlConsoleInput(q);
+                  handleExecuteSql(q);
+                }}
+                className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 font-mono text-[11px] text-amber-900 hover:bg-amber-100 transition"
+              >
+                Closed / Expired Vacancies (Stored in DB)
+              </button>
+
+              <button
+                onClick={() => {
+                  const q = "SELECT a.applicant_name, a.applicant_email, a.status, a.verification_score, v.title FROM applications a JOIN vacancies v ON a.vacancy_id = v.id ORDER BY a.created_at DESC LIMIT 10;";
+                  setSqlConsoleInput(q);
+                  handleExecuteSql(q);
+                }}
+                className="rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 font-mono text-[11px] text-blue-900 hover:bg-blue-100 transition"
+              >
+                Applications JOIN Vacancies
+              </button>
+
+              <button
+                onClick={() => {
+                  const q = "SELECT document_type, status, COUNT(*) as count FROM documents GROUP BY document_type, status;";
+                  setSqlConsoleInput(q);
+                  handleExecuteSql(q);
+                }}
+                className="rounded-lg border border-slate-200 bg-slate-100 px-2.5 py-1.5 font-mono text-[11px] text-slate-800 hover:bg-slate-200 transition"
+              >
+                Documents Summary by Status
+              </button>
+
+              <button
+                onClick={() => {
+                  const q = "SELECT id, status, actor_name, comment, created_at FROM application_timeline ORDER BY created_at DESC LIMIT 10;";
+                  setSqlConsoleInput(q);
+                  handleExecuteSql(q);
+                }}
+                className="rounded-lg border border-slate-200 bg-slate-100 px-2.5 py-1.5 font-mono text-[11px] text-slate-800 hover:bg-slate-200 transition"
+              >
+                Audit Timeline Events
+              </button>
+            </div>
+          </div>
+
+          {/* SQL Query Editor */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Terminal className="h-4 w-4 text-emerald-700" />
+                <span className="text-xs font-bold text-slate-900">SQL Query Editor</span>
+              </div>
+              <span className="text-[11px] text-slate-400 font-mono">Target: PostgreSQL (pool.query)</span>
+            </div>
+
+            <div className="relative">
+              <textarea
+                rows={4}
+                value={sqlConsoleInput}
+                onChange={(e) => setSqlConsoleInput(e.target.value)}
+                placeholder="Enter valid SQL statement (e.g. SELECT * FROM vacancies;)"
+                className="w-full rounded-xl border border-slate-300 bg-slate-950 p-3.5 font-mono text-xs text-emerald-300 focus:border-emerald-500 focus:outline-none"
+              />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] text-slate-500">
+                Press <strong>Execute SQL Query</strong> to run against live database.
+              </span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    setSqlConsoleInput('');
+                    setSqlQueryResult(null);
+                    setSqlError(null);
+                  }}
+                  className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 transition"
+                >
+                  Clear
+                </button>
+
+                <button
+                  onClick={() => handleExecuteSql()}
+                  disabled={sqlRunning || !sqlConsoleInput.trim()}
+                  className="flex items-center gap-1.5 rounded-xl bg-emerald-700 px-5 py-2 text-xs font-bold text-white shadow-xs hover:bg-emerald-800 transition disabled:opacity-50"
+                >
+                  <Play className={`h-3.5 w-3.5 fill-current ${sqlRunning ? 'animate-spin' : ''}`} />
+                  <span>{sqlRunning ? 'Executing...' : 'Execute SQL Query'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Query Error Alert */}
+          {sqlError && (
+            <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800">
+              <div className="flex items-center gap-2 font-bold mb-1">
+                <AlertTriangle className="h-4 w-4 text-rose-600" />
+                <span>SQL Execution Error</span>
+              </div>
+              <pre className="font-mono text-[11px] whitespace-pre-wrap">{sqlError}</pre>
+            </div>
+          )}
+
+          {/* Query Results Table */}
+          {sqlQueryResult && (
+            <div className="rounded-2xl border border-slate-200 bg-white shadow-xs overflow-hidden">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-3 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="rounded-md bg-emerald-100 px-2 py-0.5 font-mono font-bold text-emerald-800 border border-emerald-200 text-[11px]">
+                    200 OK
+                  </span>
+                  <span className="font-bold text-slate-800">
+                    {sqlQueryResult.rowCount ?? (sqlQueryResult.rows?.length || 0)} row(s) returned
+                  </span>
+                  <span className="text-slate-400">•</span>
+                  <span className="text-slate-500 font-mono">
+                    Execution time: {sqlQueryResult.executionTimeMs ?? 5}ms
+                  </span>
+                </div>
+
+                <button
+                  onClick={() => setRawRecordModal({ title: 'Query Results JSON', data: sqlQueryResult.rows })}
+                  className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 transition"
+                >
+                  <Code className="h-3 w-3 text-slate-400" />
+                  <span>Export JSON</span>
+                </button>
+              </div>
+
+              {(!sqlQueryResult.rows || sqlQueryResult.rows.length === 0) ? (
+                <div className="p-8 text-center text-xs text-slate-400">
+                  Query executed successfully with 0 rows returned.
+                </div>
+              ) : (
+                <div className="overflow-x-auto max-h-[500px]">
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead className="sticky top-0 border-b border-slate-200 bg-slate-100 text-slate-700 text-[11px]">
+                      <tr>
+                        {Object.keys(sqlQueryResult.rows[0]).map((headerKey) => (
+                          <th key={headerKey} className="px-4 py-2.5 font-bold">
+                            {headerKey}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-[11px]">
+                      {sqlQueryResult.rows.map((rowItem: any, rIdx: number) => (
+                        <tr key={rIdx} className="hover:bg-slate-50/80 transition">
+                          {Object.keys(sqlQueryResult.rows[0]).map((headerKey) => {
+                            const val = rowItem[headerKey];
+                            const displayVal = typeof val === 'object' && val !== null
+                              ? JSON.stringify(val)
+                              : String(val ?? 'NULL');
+                            return (
+                              <td key={headerKey} className="px-4 py-2 text-slate-700 max-w-xs truncate" title={displayVal}>
+                                {displayVal}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ---------------- Sub-View 4: Convert / Migrate to Supabase ---------------- */}
+      {dbSubView === 'supabase_migration' && (
+        <div className="space-y-6">
+          {/* Header Banner */}
+          <div className="rounded-3xl border border-emerald-200 bg-gradient-to-br from-emerald-900 via-slate-900 to-purple-950 p-6 text-white shadow-sm">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div>
+                <div className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/20 border border-emerald-400/30 px-3 py-1 text-xs font-semibold text-emerald-300 mb-2">
+                  <Server className="h-3.5 w-3.5" />
+                  <span>Supabase PostgreSQL Migration Engine</span>
+                </div>
+                <h3 className="text-xl font-black tracking-tight text-white">
+                  Convert Your Database into Supabase
+                </h3>
+                <p className="text-sm text-slate-300 mt-1 max-w-2xl">
+                  Transfer all tables, sequential IDs (<code className="text-emerald-400 font-mono">VAC-01</code>, <code className="text-emerald-400 font-mono">APP-01</code>), salary negotiation fields, demo accounts, and applicant verification pipelines into your free hosted Supabase PostgreSQL project.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const blob = new Blob([supabaseMigrationSql], { type: 'text/sql' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'supabase_migration.sql';
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                  className="flex items-center gap-1.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 px-4 py-2 text-xs font-bold text-white transition"
+                >
+                  <Download className="h-4 w-4" />
+                  <span>Download .sql File</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (supabaseMigrationSql) {
+                      navigator.clipboard.writeText(supabaseMigrationSql);
+                      setCopiedMigrationSql(true);
+                      setTimeout(() => setCopiedMigrationSql(false), 2000);
+                    }
+                  }}
+                  className="flex items-center gap-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 px-5 py-2 text-xs font-bold text-slate-950 shadow-sm transition"
+                >
+                  {copiedMigrationSql ? (
+                    <>
+                      <Check className="h-4 w-4 text-slate-950" />
+                      <span>Copied to Clipboard!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-4 w-4 text-slate-950" />
+                      <span>Copy Full SQL for Supabase</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Feature Badges */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6 pt-5 border-t border-white/10 text-xs">
+              <div className="rounded-xl bg-white/5 p-3 border border-white/10">
+                <div className="font-bold text-white">5 Core Tables</div>
+                <div className="text-[11px] text-slate-400">users, vacancies, apps, docs, timeline</div>
+              </div>
+              <div className="rounded-xl bg-white/5 p-3 border border-white/10">
+                <div className="font-bold text-emerald-400">Sequential Triggers</div>
+                <div className="text-[11px] text-slate-400">Auto VAC-01, APP-01 sequences</div>
+              </div>
+              <div className="rounded-xl bg-white/5 p-3 border border-white/10">
+                <div className="font-bold text-purple-300">Salary & Negotiation</div>
+                <div className="text-[11px] text-slate-400">Ranges, currency & notice periods</div>
+              </div>
+              <div className="rounded-xl bg-white/5 p-3 border border-white/10">
+                <div className="font-bold text-amber-300">Instant Demo Accounts</div>
+                <div className="text-[11px] text-slate-400">Admin, HR Director, Yobsan Bekele</div>
+              </div>
+            </div>
+          </div>
+
+          {/* 3 Step Visual Guide */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
+              <div className="flex items-center gap-2 mb-2 font-bold text-slate-900 text-sm">
+                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-purple-100 text-purple-900 font-bold text-xs">1</span>
+                <span>Create Supabase Project</span>
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Log into <strong>supabase.com</strong>, click <strong>"New project"</strong>, choose a name (e.g. <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[11px]">ethiojobs-db</code>), and set a secure database password.
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
+              <div className="flex items-center gap-2 mb-2 font-bold text-slate-900 text-sm">
+                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-100 text-emerald-800 font-bold text-xs">2</span>
+                <span>Paste & Run SQL</span>
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Open <strong>SQL Editor</strong> on Supabase left sidebar, click <strong>"New query"</strong>, paste the script below, and hit <strong>"Run"</strong>. All tables and data are created in 2 seconds.
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
+              <div className="flex items-center gap-2 mb-2 font-bold text-slate-900 text-sm">
+                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-100 text-blue-900 font-bold text-xs">3</span>
+                <span>Connect & Verify</span>
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Copy your <strong>Connection URI</strong> from Supabase <strong>Project Settings → Database</strong>, test it in the tester below, or paste into <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[11px]">DATABASE_URL</code>.
+              </p>
+            </div>
+          </div>
+
+          {/* Interactive Connection Tester */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Server className="h-4 w-4 text-emerald-700" />
+                <h4 className="text-sm font-bold text-slate-900">Test Live Supabase Connection URI</h4>
+              </div>
+              <span className="text-[11px] font-mono text-slate-400">Pooler Port 6543 or Direct Port 5432</span>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                type="text"
+                value={testConnectionString}
+                onChange={(e) => setTestConnectionString(e.target.value)}
+                placeholder="postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres"
+                className="flex-1 rounded-xl border border-slate-300 px-3.5 py-2.5 font-mono text-xs text-slate-900 focus:border-emerald-600 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={handleTestConnection}
+                disabled={testingConnection || !testConnectionString.trim()}
+                className="flex items-center justify-center gap-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 px-5 py-2.5 text-xs font-bold text-white transition disabled:opacity-50"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${testingConnection ? 'animate-spin' : ''}`} />
+                <span>{testingConnection ? 'Testing...' : 'Test Supabase Connection'}</span>
+              </button>
+            </div>
+
+            {/* Connection Test Results */}
+            {connectionTestResult && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50/80 p-4 text-xs text-emerald-950 space-y-2">
+                <div className="flex items-center gap-2 font-bold text-emerald-800">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                  <span>{connectionTestResult.message}</span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 text-[11px]">
+                  <div>Database: <span className="font-mono font-bold">{connectionTestResult.database}</span></div>
+                  <div>User: <span className="font-mono font-bold">{connectionTestResult.user}</span></div>
+                  <div>Latency: <span className="font-mono font-bold text-emerald-700">{connectionTestResult.executionTimeMs}ms</span></div>
+                  <div>Tables Found: <span className="font-mono font-bold text-emerald-700">{connectionTestResult.tables?.length || 0} tables</span></div>
+                </div>
+                {connectionTestResult.tables && connectionTestResult.tables.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {connectionTestResult.tables.map((tbl: string) => (
+                      <span key={tbl} className="rounded-md bg-emerald-100 border border-emerald-300 px-2 py-0.5 font-mono text-[10px] text-emerald-900 font-bold">
+                        {tbl}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {connectionTestError && (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-900">
+                <div className="flex items-center gap-2 font-bold text-rose-700 mb-1">
+                  <AlertTriangle className="h-4 w-4 text-rose-600" />
+                  <span>Connection Failed</span>
+                </div>
+                <div className="font-mono text-[11px]">{connectionTestError}</div>
+                <div className="text-[11px] text-rose-700 mt-2">
+                  Tip: Check that you replaced <code className="bg-rose-100 px-1 py-0.5 rounded font-mono">[YOUR-PASSWORD]</code> with your actual Supabase database password, and that the pooler port is set to <strong>6543</strong>.
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Migration SQL Preview Box */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+              <div>
+                <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <span>Complete Supabase SQL Script</span>
+                  <code className="rounded bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-700">supabase_migration.sql</code>
+                </h4>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Contains all 5 table DDLs, automatic sequence numbering triggers, sample demo data, and performance indexes.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={loadSupabaseMigration}
+                  disabled={loadingMigrationSql}
+                  className="flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-100 transition"
+                >
+                  <RefreshCw className={`h-3 w-3 ${loadingMigrationSql ? 'animate-spin' : ''}`} />
+                  <span>Reload Script</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(supabaseMigrationSql);
+                    setCopiedMigrationSql(true);
+                    setTimeout(() => setCopiedMigrationSql(false), 2000);
+                  }}
+                  className="flex items-center gap-1.5 rounded-lg bg-purple-900 px-3 py-1 text-xs font-bold text-white hover:bg-purple-800 transition"
+                >
+                  {copiedMigrationSql ? (
+                    <>
+                      <Check className="h-3.5 w-3.5 text-emerald-400" />
+                      <span>Copied!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-3.5 w-3.5" />
+                      <span>Copy SQL</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <div className="relative">
+              <pre className="max-h-[500px] overflow-auto rounded-xl border border-slate-800 bg-slate-950 p-4 font-mono text-xs text-emerald-400 leading-relaxed">
+                {supabaseMigrationSql || '-- Loading Supabase migration script...'}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )}
 
       {/* ---------------- Modals ---------------- */}
 
@@ -1775,15 +3181,52 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                   />
                 </div>
 
-                <div>
-                  <label className="font-semibold text-slate-700">Monthly Salary Range</label>
-                  <input
-                    type="text"
-                    value={editSalary}
-                    onChange={(e) => setEditSalary(e.target.value)}
-                    placeholder="e.g. 40,000 - 65,000 ETB"
-                    className="mt-1 w-full rounded-lg border border-slate-300 p-2.5 text-slate-900 focus:border-purple-600 focus:outline-none"
-                  />
+                <div className="col-span-1 md:col-span-2 rounded-xl border border-purple-100 bg-purple-50/50 p-3 space-y-2">
+                  <label className="font-bold text-slate-800 block text-xs">Salary & Budget Negotiations (ETB)</label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <span className="text-[10px] text-slate-500 font-semibold block">Minimum Monthly Salary</span>
+                      <input
+                        type="number"
+                        value={editMinSalary}
+                        onChange={(e) => setEditMinSalary(e.target.value)}
+                        placeholder="e.g. 40000"
+                        className="mt-0.5 w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-purple-600 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-500 font-semibold block">Maximum Monthly Salary</span>
+                      <input
+                        type="number"
+                        value={editMaxSalary}
+                        onChange={(e) => setEditMaxSalary(e.target.value)}
+                        placeholder="e.g. 65000"
+                        className="mt-0.5 w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-purple-600 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-500 font-semibold block">Custom Salary Display Text</span>
+                    <input
+                      type="text"
+                      value={editSalary}
+                      onChange={(e) => setEditSalary(e.target.value)}
+                      placeholder="e.g. 40,000 - 65,000 ETB / month"
+                      className="mt-0.5 w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-purple-600 focus:outline-none"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2 pt-1">
+                    <input
+                      type="checkbox"
+                      id="editIsNegotiableBox"
+                      checked={editIsNegotiable}
+                      onChange={(e) => setEditIsNegotiable(e.target.checked)}
+                      className="h-4 w-4 rounded text-purple-700 focus:ring-purple-600"
+                    />
+                    <label htmlFor="editIsNegotiableBox" className="text-xs font-semibold text-slate-700 cursor-pointer">
+                      Salary is negotiable based on candidate qualifications
+                    </label>
+                  </div>
                 </div>
 
                 <div>
@@ -1907,6 +3350,73 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                     onChange={(e) => setEditAppDept(e.target.value)}
                     className="mt-1 w-full rounded-lg border border-slate-300 p-2.5 text-slate-900 focus:border-purple-600 focus:outline-none"
                   />
+                </div>
+
+                <div className="col-span-1 md:col-span-2 rounded-xl border border-purple-100 bg-purple-50/50 p-3 space-y-2.5">
+                  <span className="font-bold text-slate-800 block text-xs">Candidate Compensation & Availability</span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="font-semibold text-slate-700 text-[11px]">Expected Monthly Salary (ETB)</label>
+                      <input
+                        type="text"
+                        value={editExpectedSalary}
+                        onChange={(e) => setEditExpectedSalary(e.target.value)}
+                        placeholder="e.g. 55,000 ETB / month"
+                        className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-purple-600 focus:outline-none text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="font-semibold text-slate-700 text-[11px]">Salary Negotiation Preference</label>
+                      <select
+                        value={editSalaryPref}
+                        onChange={(e) => setEditSalaryPref(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-purple-600 focus:outline-none text-xs"
+                      >
+                        <option value="Negotiable">Negotiable</option>
+                        <option value="Open to discussion">Open to discussion</option>
+                        <option value="Non-negotiable">Non-negotiable</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="font-semibold text-slate-700 text-[11px]">Notice Period / Earliest Start</label>
+                      <select
+                        value={editNoticePeriod}
+                        onChange={(e) => setEditNoticePeriod(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-purple-600 focus:outline-none text-xs"
+                      >
+                        <option value="Immediate">Immediate</option>
+                        <option value="1 Week">1 Week</option>
+                        <option value="2 Weeks">2 Weeks</option>
+                        <option value="1 Month">1 Month</option>
+                        <option value="Negotiable">Negotiable</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="font-semibold text-slate-700 text-[11px]">Current Employment Status</label>
+                      <select
+                        value={editEmploymentStatus}
+                        onChange={(e) => setEditEmploymentStatus(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-purple-600 focus:outline-none text-xs"
+                      >
+                        <option value="Active Candidate">Active Candidate</option>
+                        <option value="Employed (Looking)">Employed (Looking)</option>
+                        <option value="Immediately Available">Immediately Available</option>
+                        <option value="Notice Period Active">Notice Period Active</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 pt-1">
+                    <input
+                      type="checkbox"
+                      id="editIsSalaryNegotiableBox"
+                      checked={editIsSalaryNegotiable}
+                      onChange={(e) => setEditIsSalaryNegotiable(e.target.checked)}
+                      className="h-4 w-4 rounded text-purple-700 focus:ring-purple-600"
+                    />
+                    <label htmlFor="editIsSalaryNegotiableBox" className="text-xs font-semibold text-slate-700 cursor-pointer">
+                      Candidate is open to salary negotiations
+                    </label>
+                  </div>
                 </div>
 
                 <div>

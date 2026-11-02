@@ -123,11 +123,12 @@ export const api = {
   },
 
   // Vacancies
-  getVacancies: async (params?: { department?: string; search?: string; status?: string }): Promise<Vacancy[]> => {
+  getVacancies: async (params?: { department?: string; search?: string; status?: string; includeExpired?: boolean }): Promise<Vacancy[]> => {
     const q = new URLSearchParams();
     if (params?.department) q.append('department', params.department);
     if (params?.search) q.append('search', params.search);
     if (params?.status) q.append('status', params.status);
+    if (params?.includeExpired) q.append('includeExpired', 'true');
     const endpoint = `/vacancies?${q.toString()}`;
 
     return executeWithFallback(
@@ -371,4 +372,45 @@ export const api = {
       () => localStore.getRecruiterMetrics()
     );
   },
+
+  // Direct SQL Query Runner for System Administrators
+  runSqlQuery: async (sql: string): Promise<any> => {
+    return executeWithFallback(
+      () => safeApiRequest<any>('/admin/sql-query', {
+        method: 'POST',
+        body: JSON.stringify({ sql }),
+      }),
+      () => localStore.runSqlQuery(sql)
+    );
+  },
+
+  // Export complete Supabase SQL migration script
+  getSupabaseMigrationSql: async (): Promise<{ ok: boolean; sql: string; filename: string }> => {
+    return executeWithFallback(
+      () => safeApiRequest<{ ok: boolean; sql: string; filename: string }>('/admin/supabase-migration-sql'),
+      () => localStore.getSupabaseMigrationSql()
+    );
+  },
+
+  // Test live connection to a Supabase database instance
+  testDatabaseConnection: async (connectionString: string): Promise<{
+    ok: boolean;
+    database?: string;
+    user?: string;
+    version?: string;
+    tables?: string[];
+    isConfiguredForTalentFlow?: boolean;
+    executionTimeMs?: number;
+    message?: string;
+    error?: string;
+  }> => {
+    return executeWithFallback(
+      () => safeApiRequest<any>('/admin/test-database-connection', {
+        method: 'POST',
+        body: JSON.stringify({ connectionString }),
+      }),
+      () => localStore.testDatabaseConnection(connectionString)
+    );
+  },
 };
+

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Vacancy, Application, User } from '../types';
+import { Vacancy, Application, User, isVacancyClosed } from '../types';
 import { api } from '../api';
 import {
   Briefcase,
@@ -86,10 +86,16 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
   const [selectedDept, setSelectedDept] = useState('All');
   const [selectedCity, setSelectedCity] = useState('All');
 
+  const [deadlineNotice, setDeadlineNotice] = useState<string | null>(null);
+
   // Trigger apply modal if pending vacancy was remembered across register/sign-in
   useEffect(() => {
     if (pendingVacancyToApply && currentUser) {
-      setApplyingVacancy(pendingVacancyToApply);
+      if (isVacancyClosed(pendingVacancyToApply)) {
+        setDeadlineNotice(`The application deadline for "${pendingVacancyToApply.title}" has closed. This position is no longer accepting applications.`);
+      } else {
+        setApplyingVacancy(pendingVacancyToApply);
+      }
       if (onClearPendingVacancy) {
         onClearPendingVacancy();
       }
@@ -108,17 +114,25 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
         currentUser?.role === 'applicant' ? api.getApplications() : Promise.resolve([]),
       ]);
 
-      let filtered = vacs;
+      // Remove any vacancies whose deadline is passed or status is Closed from public view
+      let filtered = vacs.filter((v) => !isVacancyClosed(v));
+
       if (selectedCity !== 'All') {
-        filtered = vacs.filter((v) =>
+        filtered = filtered.filter((v) =>
           v.location.toLowerCase().includes(selectedCity.toLowerCase())
         );
       }
 
       setVacancies(filtered);
       setMyApplications(apps);
-      if (filtered.length > 0 && !selectedVacancy) {
-        setSelectedVacancy(filtered[0]);
+
+      // Keep current selection if still active, otherwise select first active or null
+      if (filtered.length > 0) {
+        if (!selectedVacancy || isVacancyClosed(selectedVacancy) || !filtered.some((v) => v.id === selectedVacancy.id)) {
+          setSelectedVacancy(filtered[0]);
+        }
+      } else {
+        setSelectedVacancy(null);
       }
     } catch (err: any) {
       console.error('Error fetching portal data:', err);
@@ -204,6 +218,22 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
         </div>
       )}
 
+      {/* In-app Notice if applicant attempted to view or apply to a closed vacancy */}
+      {deadlineNotice && (
+        <div className="flex items-center justify-between rounded-2xl bg-amber-50 border border-amber-200 p-4 text-xs text-amber-900">
+          <div className="flex items-center gap-2">
+            <span className="font-bold">Notice:</span>
+            <span>{deadlineNotice}</span>
+          </div>
+          <button
+            onClick={() => setDeadlineNotice(null)}
+            className="text-amber-700 hover:text-amber-900 font-bold px-2 py-1 rounded"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* View 1: Job Openings Browser */}
       {activeTab === 'openings' ? (
         <div className="space-y-6">
@@ -281,13 +311,18 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
                   </div>
                 </div>
               ) : vacancies.length === 0 ? (
-                <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-xs text-slate-500">
-                  No vacancies found matching your search. Try changing city or sector filters.
+                <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-xs text-slate-500 space-y-1">
+                  <p className="font-bold text-slate-700">No active vacancies available</p>
+                  <p className="text-[11px] text-slate-400">
+                    Positions past their application deadline are automatically closed and archived in the admin database. Please check back soon or adjust your search.
+                  </p>
                 </div>
               ) : (
-                vacancies.map((v) => {
+                vacancies.map((v, idx) => {
                   const applied = getApplicationForVacancy(v.id);
                   const isSelected = selectedVacancy?.id === v.id;
+                  const seqPadded = v.seqId || String(idx + 1).padStart(2, '0');
+                  const code = v.jobCode || `VAC-${seqPadded}`;
 
                   return (
                     <div
@@ -301,9 +336,14 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <span className="rounded bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
-                            {v.department}
-                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="rounded bg-emerald-800 px-2 py-0.5 text-[10px] font-mono font-bold text-white shadow-2xs">
+                              #{seqPadded} ({code})
+                            </span>
+                            <span className="rounded bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
+                              {v.department}
+                            </span>
+                          </div>
                           <h3 className="mt-1 text-sm font-bold text-slate-900">{v.title}</h3>
                         </div>
                         {applied && (
@@ -323,10 +363,17 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
                           {v.type}
                         </span>
                         {v.salaryRange && (
-                          <span className="flex items-center gap-1 font-bold text-emerald-700">
+                          <div className="flex items-center gap-1 font-bold text-emerald-700">
                             <DollarSign className="h-3.5 w-3.5" />
-                            {v.salaryRange}
-                          </span>
+                            <span>{v.salaryRange}</span>
+                            <span className={`ml-1 rounded px-1.5 py-0.2 text-[9px] font-bold ${
+                              v.isNegotiable !== false
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-slate-100 text-slate-600'
+                            }`}>
+                              {v.isNegotiable !== false ? 'Negotiable' : 'Fixed'}
+                            </span>
+                          </div>
                         )}
                       </div>
 
@@ -351,6 +398,9 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
                   <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4">
                     <div>
                       <div className="flex items-center gap-2">
+                        <span className="rounded-md bg-emerald-800 px-2.5 py-0.5 text-xs font-mono font-bold text-white shadow-2xs">
+                          {selectedVacancy.jobCode || `VAC-${selectedVacancy.seqId || '01'}`}
+                        </span>
                         <span className="rounded-md bg-emerald-100 px-2.5 py-0.5 text-xs font-bold text-emerald-800">
                           {selectedVacancy.department}
                         </span>
@@ -362,7 +412,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
                       <h2 className="mt-1.5 text-xl font-bold text-slate-900">
                         {selectedVacancy.title}
                       </h2>
-                      <div className="mt-1 flex items-center gap-3 text-xs text-slate-600">
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-600">
                         <span>{selectedVacancy.type}</span>
                         <span>•</span>
                         <span>Level: {selectedVacancy.experienceLevel}</span>
@@ -371,6 +421,13 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
                             <span>•</span>
                             <span className="font-bold text-emerald-700">
                               {selectedVacancy.salaryRange}
+                            </span>
+                            <span className={`rounded px-1.5 py-0.2 text-[10px] font-bold ${
+                              selectedVacancy.isNegotiable !== false
+                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                : 'bg-slate-100 text-slate-600 border border-slate-200'
+                            }`}>
+                              {selectedVacancy.isNegotiable !== false ? '✓ Salary is Negotiable' : 'Fixed Salary'}
                             </span>
                           </>
                         )}

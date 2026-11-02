@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Application } from '../types';
+import { Application, formatSequentialId } from '../types';
 import { api } from '../api';
 import {
   FileText,
@@ -15,6 +15,7 @@ import {
   Eye,
   Calendar,
   ChevronRight,
+  DollarSign,
 } from 'lucide-react';
 
 interface ApplicationDetailModalProps {
@@ -113,13 +114,18 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
         <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4 bg-slate-50">
           <div>
             <div className="flex items-center gap-2">
+              <span className="rounded-md bg-emerald-800 px-2 py-0.5 text-xs font-mono font-bold text-white shadow-2xs">
+                {app.appCode || formatSequentialId(app.seqNumber, app.id, 'APP')}
+              </span>
               <h2 className="text-lg font-bold text-slate-900">{app.applicantName}</h2>
               <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-800">
                 {app.vacancyTitle}
               </span>
             </div>
-            <p className="text-xs text-slate-500 mt-0.5 flex items-center gap-3">
+            <p className="text-xs text-slate-500 mt-1 flex items-center gap-3">
               <span>Department: <strong className="text-slate-700 font-semibold">{app.department || app.vacancyDepartment}</strong></span>
+              <span>•</span>
+              <span>Application ID: <strong className="font-mono text-emerald-800">{app.seqId || '01'}</strong></span>
               <span>•</span>
               <span>Applied: {new Date(app.createdAt).toLocaleDateString()}</span>
             </p>
@@ -181,6 +187,63 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
           <div className="grid gap-6 md:grid-cols-3">
             {/* Left 2 Cols: Details & Documents */}
             <div className="md:col-span-2 space-y-5">
+              {/* Compensation & Negotiations Card */}
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 shadow-2xs space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-emerald-900 flex items-center gap-1.5">
+                    <DollarSign className="h-4 w-4 text-emerald-700" />
+                    Candidate Compensation & Availability
+                  </h4>
+                  <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-bold ${
+                    app.isSalaryNegotiable !== false
+                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                      : 'bg-slate-100 text-slate-700 border border-slate-300'
+                  }`}>
+                    {app.isSalaryNegotiable !== false ? '✓ Salary is Negotiable' : 'Fixed Salary Expectation'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs pt-1">
+                  <div className="rounded-lg bg-white p-2.5 border border-emerald-200">
+                    <span className="text-[11px] text-slate-500 block">Expected Monthly Salary</span>
+                    <strong className="text-sm font-bold text-emerald-900 block mt-0.5">
+                      {app.expectedSalary || 'Negotiable (ETB)'}
+                    </strong>
+                    <span className="text-[10px] text-slate-500">
+                      Preference: {app.salaryNegotiationPreference || 'Open to discussion'}
+                    </span>
+                  </div>
+
+                  <div className="rounded-lg bg-white p-2.5 border border-emerald-200">
+                    <span className="text-[11px] text-slate-500 block">Notice Period / Earliest Join Date</span>
+                    <strong className="text-sm font-bold text-slate-800 block mt-0.5">
+                      {app.noticePeriod || '1 Month'}
+                    </strong>
+                    <span className="text-[10px] text-slate-500">
+                      Status: {app.employmentStatus || 'Active Candidate'}
+                    </span>
+                  </div>
+
+                  {app.currentSalary && (
+                    <div className="rounded-lg bg-white p-2.5 border border-slate-200">
+                      <span className="text-[11px] text-slate-500 block">Current Salary</span>
+                      <strong className="text-xs font-semibold text-slate-700 block mt-0.5">
+                        {app.currentSalary}
+                      </strong>
+                    </div>
+                  )}
+
+                  {app.yearsOfExperience && (
+                    <div className="rounded-lg bg-white p-2.5 border border-slate-200">
+                      <span className="text-[11px] text-slate-500 block">Experience & Qualification</span>
+                      <strong className="text-xs font-semibold text-slate-700 block mt-0.5">
+                        {app.yearsOfExperience} {app.educationLevel ? `• ${app.educationLevel}` : ''}
+                      </strong>
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {/* Contact Information Box */}
               <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs space-y-2">
                 <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">

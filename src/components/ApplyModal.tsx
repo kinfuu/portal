@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { Vacancy } from '../types';
+import { Vacancy, isVacancyClosed } from '../types';
 import { api } from '../api';
 import { DocumentUploader } from './DocumentUploader';
-import { Briefcase, Send, CheckCircle2, AlertCircle, FileText, Phone, Mail, User as UserIcon, MapPin, GraduationCap, Building2 } from 'lucide-react';
+import { Briefcase, Send, CheckCircle2, AlertCircle, FileText, Phone, Mail, User as UserIcon, MapPin, GraduationCap, Building2, DollarSign } from 'lucide-react';
 
 const DEPARTMENTS = [
   'Technology & IT',
@@ -41,6 +41,15 @@ export const ApplyModal: React.FC<ApplyModalProps> = ({
   const [city, setCity] = useState('Addis Ababa');
   const [experienceYears, setExperienceYears] = useState('2-4 years');
   const [educationLevel, setEducationLevel] = useState("Bachelor's Degree");
+  
+  // Related salary and negotiations fields
+  const [expectedSalary, setExpectedSalary] = useState('55,000 ETB / month');
+  const [isSalaryNegotiable, setIsSalaryNegotiable] = useState(true);
+  const [salaryNegotiationPreference, setSalaryNegotiationPreference] = useState('Negotiable (ክፍት ነው)');
+  const [currentSalary, setCurrentSalary] = useState('');
+  const [noticePeriod, setNoticePeriod] = useState('2 Weeks');
+  const [employmentStatus, setEmploymentStatus] = useState('Employed (Exploring new roles)');
+
   const [coverLetter, setCoverLetter] = useState('');
   const [portfolioUrl, setPortfolioUrl] = useState('');
   const [linkedinUrl, setLinkedinUrl] = useState('');
@@ -55,9 +64,16 @@ export const ApplyModal: React.FC<ApplyModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const isClosed = isVacancyClosed(vacancy);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (isClosed) {
+      setError('This vacancy is closed or its deadline has expired. Applications can no longer be accepted.');
+      return;
+    }
 
     // Ensure resume is uploaded
     const hasResume = documents.some((d) => d.documentType.toLowerCase().includes('resume') || d.documentType.toLowerCase().includes('cv'));
@@ -73,7 +89,7 @@ export const ApplyModal: React.FC<ApplyModalProps> = ({
     try {
       setLoading(true);
       
-      const fullCoverLetter = `[Department: ${effectiveDepartment} | Location: ${city} | Experience: ${experienceYears} | Education: ${educationLevel}]\n\n${coverLetter}`;
+      const fullCoverLetter = `[Department: ${effectiveDepartment} | Location: ${city} | Experience: ${experienceYears} | Education: ${educationLevel} | Expected Salary: ${expectedSalary} (${salaryNegotiationPreference}) | Notice Period: ${noticePeriod}]\n\n${coverLetter}`;
 
       await api.submitApplication({
         vacancyId: vacancy.id,
@@ -81,6 +97,14 @@ export const ApplyModal: React.FC<ApplyModalProps> = ({
         applicantEmail,
         applicantPhone,
         department: effectiveDepartment,
+        expectedSalary,
+        isSalaryNegotiable,
+        salaryNegotiationPreference,
+        currentSalary: currentSalary || undefined,
+        noticePeriod,
+        yearsOfExperience: experienceYears,
+        educationLevel,
+        employmentStatus,
         coverLetter: fullCoverLetter,
         portfolioUrl,
         linkedinUrl,
@@ -324,6 +348,107 @@ export const ApplyModal: React.FC<ApplyModalProps> = ({
             </div>
           </div>
 
+          {/* Salary & Negotiations Section */}
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-1.5">
+              <label className="flex items-center gap-1.5 text-xs font-bold text-slate-900">
+                <DollarSign className="h-4 w-4 text-emerald-700" />
+                Expected Salary & Negotiations / የሚጠበቅ ደመወዝ እና ድርድር *
+              </label>
+              {vacancy.salaryRange && (
+                <span className="rounded-md bg-emerald-100 border border-emerald-300 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
+                  Vacancy Budget: {vacancy.salaryRange}
+                </span>
+              )}
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                  Expected Monthly Salary (ETB) *
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3 top-2 text-xs font-bold text-emerald-700">ETB</span>
+                  <input
+                    type="text"
+                    required
+                    value={expectedSalary}
+                    onChange={(e) => setExpectedSalary(e.target.value)}
+                    placeholder="e.g. 50,000 ETB / month"
+                    className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-12 pr-3 text-xs font-semibold text-slate-900 focus:border-emerald-600 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                  Salary Negotiability / የደመወዝ ድርድር *
+                </label>
+                <select
+                  value={salaryNegotiationPreference}
+                  onChange={(e) => {
+                    setSalaryNegotiationPreference(e.target.value);
+                    setIsSalaryNegotiable(!e.target.value.includes('Non-negotiable'));
+                  }}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-900 focus:border-emerald-600 focus:outline-none"
+                >
+                  <option value="Negotiable (ክፍት ነው)">Negotiable (ደመወዝ በስምምነት ክፍት ነው)</option>
+                  <option value="Open to discussion (ከጥቅማጥቅም ጋር)">Open to discussion with allowances & benefits</option>
+                  <option value="Non-negotiable (የማይቀየር)">Non-negotiable (Fixed minimum expectation)</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-3 pt-1">
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                  Earliest Start Date / Notice Period *
+                </label>
+                <select
+                  value={noticePeriod}
+                  onChange={(e) => setNoticePeriod(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-emerald-600 focus:outline-none"
+                >
+                  <option value="Immediate">Immediate Start</option>
+                  <option value="1 Week">Within 1 Week</option>
+                  <option value="2 Weeks">Within 2 Weeks</option>
+                  <option value="1 Month">1 Month Notice</option>
+                  <option value="2 Months">2 Months Notice</option>
+                  <option value="Negotiable">Negotiable Notice</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                  Current Salary (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={currentSalary}
+                  onChange={(e) => setCurrentSalary(e.target.value)}
+                  placeholder="e.g. 40,000 ETB"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-emerald-600 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                  Current Employment Status
+                </label>
+                <select
+                  value={employmentStatus}
+                  onChange={(e) => setEmploymentStatus(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-emerald-600 focus:outline-none"
+                >
+                  <option value="Employed (Exploring new roles)">Employed (Exploring new roles)</option>
+                  <option value="Unemployed (Ready immediately)">Unemployed (Available immediately)</option>
+                  <option value="Recent Graduate">Recent Graduate / Student</option>
+                  <option value="Freelancer / Contractor">Freelancer / Independent Contractor</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
               Cover Note / Why are you a good fit?
@@ -346,6 +471,15 @@ export const ApplyModal: React.FC<ApplyModalProps> = ({
             />
           </div>
 
+          {isClosed && (
+            <div className="flex items-center gap-2 rounded-xl border border-rose-300 bg-rose-50 p-3 text-xs text-rose-800 font-semibold">
+              <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
+              <span>
+                The application deadline for this vacancy has expired. It is archived in the database and no longer accepts submissions.
+              </span>
+            </div>
+          )}
+
           <div className="flex items-center justify-between pt-3 border-t border-slate-200">
             <p className="text-[11px] text-slate-500">
               Your application and CV will be stored securely in the database for the recruiter to review.
@@ -360,11 +494,11 @@ export const ApplyModal: React.FC<ApplyModalProps> = ({
               </button>
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || isClosed}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 px-5 py-2.5 text-xs font-bold text-white shadow-md hover:bg-emerald-800 transition disabled:opacity-50"
               >
                 <Send className="h-3.5 w-3.5" />
-                {loading ? 'Submitting Application...' : 'Submit Application'}
+                {loading ? 'Submitting Application...' : isClosed ? 'Deadline Closed' : 'Submit Application'}
               </button>
             </div>
           </div>

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api';
-import { Application, User, Vacancy } from '../types';
+import { Application, User, Vacancy, isVacancyClosed } from '../types';
 import {
   Users,
   Briefcase,
@@ -75,7 +75,7 @@ export const RecruiterDashboard: React.FC<RecruiterDashboardProps> = ({
           status: statusFilter !== 'All' ? statusFilter : undefined,
           department: deptFilter !== 'All' ? deptFilter : undefined,
         }),
-        api.getVacancies(),
+        api.getVacancies({ includeExpired: true }),
       ]);
       setMetrics(metricsData);
       setApplications(appsData);
@@ -409,19 +409,39 @@ export const RecruiterDashboard: React.FC<RecruiterDashboardProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  applications.map((app) => (
-                    <tr key={app.id} className="hover:bg-slate-50/70 transition">
-                      <td className="px-5 py-4">
-                        <div className="font-bold text-slate-900">{app.applicantName}</div>
-                        <div className="flex items-center gap-3 mt-1 text-[11px] text-slate-500">
-                          <span className="flex items-center gap-1 font-mono">
-                            <Mail className="h-3 w-3 text-slate-400" /> {app.applicantEmail}
-                          </span>
-                          <span className="flex items-center gap-1 font-mono">
-                            <Phone className="h-3 w-3 text-slate-400" /> {app.applicantPhone}
-                          </span>
-                        </div>
-                      </td>
+                  applications.map((app, idx) => {
+                    const seqPadded = app.seqId || String(idx + 1).padStart(2, '0');
+                    const code = app.appCode || `APP-${seqPadded}`;
+                    return (
+                      <tr key={app.id} className="hover:bg-slate-50/70 transition">
+                        <td className="px-5 py-4">
+                          <div className="flex items-center gap-1.5">
+                            <span className="rounded bg-emerald-100 text-emerald-900 font-mono font-bold text-[10px] px-2 py-0.5 shadow-2xs">
+                              #{seqPadded} ({code})
+                            </span>
+                            <div className="font-bold text-slate-900">{app.applicantName}</div>
+                          </div>
+                          <div className="flex items-center gap-3 mt-1 text-[11px] text-slate-500">
+                            <span className="flex items-center gap-1 font-mono">
+                              <Mail className="h-3 w-3 text-slate-400" /> {app.applicantEmail}
+                            </span>
+                            <span className="flex items-center gap-1 font-mono">
+                              <Phone className="h-3 w-3 text-slate-400" /> {app.applicantPhone}
+                            </span>
+                          </div>
+                          {app.expectedSalary && (
+                            <div className="mt-1 flex items-center gap-1.5 text-[10px]">
+                              <span className="font-bold text-emerald-800">Expected: {app.expectedSalary}</span>
+                              <span className={`rounded px-1.5 py-0.2 text-[9px] font-bold ${
+                                app.isSalaryNegotiable !== false
+                                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                  : 'bg-slate-100 text-slate-600 border border-slate-200'
+                              }`}>
+                                {app.salaryNegotiationPreference || (app.isSalaryNegotiable !== false ? 'Negotiable' : 'Fixed')}
+                              </span>
+                            </div>
+                          )}
+                        </td>
 
                       <td className="px-5 py-4">
                         <div className="font-semibold text-slate-800">{app.vacancyTitle}</div>
@@ -484,8 +504,9 @@ export const RecruiterDashboard: React.FC<RecruiterDashboardProps> = ({
                         </button>
                       </td>
                     </tr>
-                  ))
-                )}
+                  );
+                })
+              )}
               </tbody>
             </table>
           </div>
@@ -511,26 +532,54 @@ export const RecruiterDashboard: React.FC<RecruiterDashboardProps> = ({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {vacancies.map((v) => (
+            {vacancies.map((v, idx) => {
+              const seqPadded = v.seqId || String(idx + 1).padStart(2, '0');
+              const code = v.jobCode || `VAC-${seqPadded}`;
+              return (
               <div key={v.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs flex flex-col justify-between">
                 <div>
                   <div className="flex items-start justify-between">
                     <div>
-                      <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-800 border border-emerald-200">
-                        {v.department}
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="rounded-md bg-emerald-800 px-2 py-0.5 text-[10px] font-mono font-bold text-white shadow-2xs">
+                          #{seqPadded} ({code})
+                        </span>
+                        <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-800 border border-emerald-200">
+                          {v.department}
+                        </span>
+                      </div>
                       <h4 className="mt-1.5 text-base font-bold text-slate-900">{v.title}</h4>
                       <p className="text-xs text-slate-500">{v.location} • {v.type}</p>
                     </div>
-                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
-                      {v.status}
-                    </span>
+                    <div className="flex flex-col items-end gap-1">
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-700 border border-slate-200">
+                        {v.status}
+                      </span>
+                      {isVacancyClosed(v) ? (
+                        <span className="rounded-md bg-amber-50 px-2 py-0.5 text-[9px] font-bold text-amber-800 border border-amber-200">
+                          Closed / Archived in DB
+                        </span>
+                      ) : (
+                        <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[9px] font-bold text-emerald-800 border border-emerald-200">
+                          Active Public
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   <p className="mt-3 text-xs text-slate-600 line-clamp-3">{v.description}</p>
 
                   <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-500">
-                    <span className="font-bold text-emerald-800">{v.salaryRange || 'Competitive ETB'}</span>
+                    <div>
+                      <span className="font-bold text-emerald-800">{v.salaryRange || 'Competitive ETB'}</span>
+                      <span className={`ml-2 inline-block rounded px-1.5 py-0.2 text-[9px] font-bold ${
+                        v.isNegotiable !== false
+                          ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                          : 'bg-slate-100 text-slate-600 border border-slate-200'
+                      }`}>
+                        {v.isNegotiable !== false ? '✓ Negotiable' : 'Fixed'}
+                      </span>
+                    </div>
                     <span>{v.applicantCount || 0} Applicants</span>
                   </div>
 
@@ -556,7 +605,8 @@ export const RecruiterDashboard: React.FC<RecruiterDashboardProps> = ({
                   </div>
                 )}
               </div>
-            ))}
+            );
+          })}
           </div>
         </div>
       )}

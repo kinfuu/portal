@@ -14,7 +14,11 @@ export const CreateVacancyModal: React.FC<CreateVacancyModalProps> = ({ onClose,
   const [location, setLocation] = useState('Addis Ababa, Bole (Hybrid)');
   const [type, setType] = useState('Full-time');
   const [experienceLevel, setExperienceLevel] = useState('Mid-Level');
-  const [salaryRange, setSalaryRange] = useState('45,000 - 65,000 ETB / month');
+  const [minSalary, setMinSalary] = useState<string>('50000');
+  const [maxSalary, setMaxSalary] = useState<string>('75000');
+  const [currency, setCurrency] = useState('ETB');
+  const [isNegotiable, setIsNegotiable] = useState(true);
+  const [negotiationNotes, setNegotiationNotes] = useState('Open to negotiation based on experience');
   const [deadline, setDeadline] = useState(() => {
     const d = new Date();
     d.setDate(d.getDate() + 30);
@@ -25,6 +29,11 @@ export const CreateVacancyModal: React.FC<CreateVacancyModalProps> = ({ onClose,
   const [requiredDocuments, setRequiredDocuments] = useState('Resume / CV');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Computed salary display string
+  const computedSalary = minSalary && maxSalary
+    ? `${Number(minSalary).toLocaleString()} - ${Number(maxSalary).toLocaleString()} ${currency} / month${isNegotiable ? ' (Negotiable)' : ''}`
+    : 'Competitive ETB (Negotiable)';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -37,7 +46,12 @@ export const CreateVacancyModal: React.FC<CreateVacancyModalProps> = ({ onClose,
         location,
         type,
         experienceLevel,
-        salaryRange,
+        minSalary: minSalary ? parseInt(minSalary, 10) : undefined,
+        maxSalary: maxSalary ? parseInt(maxSalary, 10) : undefined,
+        currency,
+        isNegotiable,
+        negotiationNotes,
+        salaryRange: computedSalary,
         description,
         requirements,
         requiredDocuments,
@@ -62,8 +76,13 @@ export const CreateVacancyModal: React.FC<CreateVacancyModalProps> = ({ onClose,
               <PlusCircle className="h-5 w-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-white">Post New Ethiopian Vacancy</h2>
-              <p className="text-xs text-emerald-100">Publish job opening directly to the Ethiopian portal & database</p>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-bold text-white">Post New Ethiopian Vacancy</h2>
+                <span className="rounded bg-emerald-900/80 border border-emerald-600/50 px-2 py-0.5 text-[10px] font-mono font-bold text-emerald-200">
+                  ID: Auto-sequenced (01, 02...)
+                </span>
+              </div>
+              <p className="text-xs text-emerald-100">Publish job opening directly with sequential code, salary & negotiations</p>
             </div>
           </div>
           <button
@@ -112,7 +131,7 @@ export const CreateVacancyModal: React.FC<CreateVacancyModalProps> = ({ onClose,
             </div>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-4 sm:grid-cols-3">
             <div>
               <label className="font-semibold text-slate-700">Location in Ethiopia *</label>
               <input
@@ -140,17 +159,6 @@ export const CreateVacancyModal: React.FC<CreateVacancyModalProps> = ({ onClose,
             </div>
 
             <div>
-              <label className="font-semibold text-slate-700">Salary Range (ETB)</label>
-              <input
-                type="text"
-                value={salaryRange}
-                onChange={(e) => setSalaryRange(e.target.value)}
-                placeholder="40,000 - 60,000 ETB / month"
-                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 focus:border-emerald-600 focus:outline-none"
-              />
-            </div>
-
-            <div>
               <label className="font-semibold text-slate-700 flex items-center gap-1.5">
                 <Calendar className="h-3.5 w-3.5 text-emerald-700" />
                 Application Deadline *
@@ -163,6 +171,90 @@ export const CreateVacancyModal: React.FC<CreateVacancyModalProps> = ({ onClose,
                 className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 focus:border-emerald-600 focus:outline-none"
               />
             </div>
+          </div>
+
+          {/* Salary & Negotiations Section */}
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="flex items-center gap-1.5 font-bold text-slate-900 text-xs">
+                <DollarSign className="h-4 w-4 text-emerald-700" />
+                Salary & Negotiations / ደመወዝ እና ድርድር *
+              </label>
+              <span className="text-[11px] font-semibold text-emerald-800 bg-emerald-100/80 px-2 py-0.5 rounded-md">
+                Preview: {computedSalary}
+              </span>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div>
+                <label className="text-slate-600 font-medium">Minimum Salary ({currency})</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1000"
+                  value={minSalary}
+                  onChange={(e) => setMinSalary(e.target.value)}
+                  placeholder="e.g. 50000"
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 font-semibold focus:border-emerald-600 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-600 font-medium">Maximum Salary ({currency})</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1000"
+                  value={maxSalary}
+                  onChange={(e) => setMaxSalary(e.target.value)}
+                  placeholder="e.g. 75000"
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 font-semibold focus:border-emerald-600 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-600 font-medium">Currency</label>
+                <select
+                  value={currency}
+                  onChange={(e) => setCurrency(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 font-semibold focus:border-emerald-600 focus:outline-none"
+                >
+                  <option value="ETB">ETB (Ethiopian Birr)</option>
+                  <option value="USD">USD (US Dollar)</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-emerald-200/60">
+              <label className="flex items-center gap-2 cursor-pointer font-semibold text-slate-800">
+                <input
+                  type="checkbox"
+                  checked={isNegotiable}
+                  onChange={(e) => setIsNegotiable(e.target.checked)}
+                  className="h-4 w-4 rounded text-emerald-600 border-slate-300 focus:ring-emerald-500"
+                />
+                <span>Salary is Negotiable (ደመወዝ በስምምነት ክፍት ነው)</span>
+              </label>
+
+              {isNegotiable && (
+                <span className="text-[11px] text-emerald-700 font-medium">
+                  ✓ Candidates will see this role allows compensation negotiation
+                </span>
+              )}
+            </div>
+
+            {isNegotiable && (
+              <div>
+                <label className="text-slate-600 font-medium">Negotiation Note / Remarks (Optional)</label>
+                <input
+                  type="text"
+                  value={negotiationNotes}
+                  onChange={(e) => setNegotiationNotes(e.target.value)}
+                  placeholder="e.g. Open to higher compensation based on exceptional candidate experience"
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:border-emerald-600 focus:outline-none"
+                />
+              </div>
+            )}
           </div>
 
           <div>

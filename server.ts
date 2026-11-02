@@ -2,6 +2,9 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import fs from 'fs';
+import path from 'path';
+import pg from 'pg';
 import { pool } from './src/db/index.js';
 import { GoogleGenAI } from '@google/genai';
 
@@ -62,11 +65,154 @@ export function isSystemAdmin(role?: string) {
 // Seed initial database demo records if empty
 async function seedInitialData() {
   try {
-    // Migrate any legacy roles to the 4 standardized roles
+    // 1. Create tables if they do not exist (supports fresh Supabase or PostgreSQL instances)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        email VARCHAR(255) NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        full_name VARCHAR(255) NOT NULL,
+        role VARCHAR(50) NOT NULL DEFAULT 'applicant',
+        created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+        updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS vacancies (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        seq_number INTEGER,
+        job_code VARCHAR(50),
+        title VARCHAR(255) NOT NULL,
+        department VARCHAR(150) NOT NULL,
+        location VARCHAR(150) NOT NULL,
+        type VARCHAR(50) NOT NULL DEFAULT 'Full-time',
+        experience_level VARCHAR(50) NOT NULL DEFAULT 'Mid-Level',
+        salary_range VARCHAR(100),
+        min_salary INTEGER,
+        max_salary INTEGER,
+        currency VARCHAR(20) DEFAULT 'ETB',
+        is_negotiable BOOLEAN DEFAULT true,
+        negotiation_notes TEXT,
+        description TEXT NOT NULL,
+        requirements TEXT NOT NULL,
+        status VARCHAR(50) NOT NULL DEFAULT 'Open',
+        required_documents TEXT NOT NULL DEFAULT 'Resume / CV, Academic Degree',
+        deadline TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+        created_by UUID REFERENCES users(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS applications (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        seq_number INTEGER,
+        app_code VARCHAR(50),
+        vacancy_id UUID REFERENCES vacancies(id) ON DELETE CASCADE NOT NULL,
+        applicant_id UUID REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+        applicant_name VARCHAR(255) NOT NULL,
+        applicant_email VARCHAR(255) NOT NULL,
+        applicant_phone VARCHAR(50) NOT NULL,
+        department VARCHAR(150),
+        expected_salary VARCHAR(100),
+        is_salary_negotiable BOOLEAN DEFAULT true,
+        salary_negotiation_preference VARCHAR(100) DEFAULT 'Negotiable',
+        current_salary VARCHAR(100),
+        notice_period VARCHAR(100) DEFAULT '1 Month',
+        years_of_experience VARCHAR(100),
+        education_level VARCHAR(150),
+        employment_status VARCHAR(100),
+        cover_letter TEXT,
+        portfolio_url VARCHAR(500),
+        linkedin_url VARCHAR(500),
+        status VARCHAR(50) NOT NULL DEFAULT 'Submitted',
+        verification_status VARCHAR(50) NOT NULL DEFAULT 'Pending',
+        verification_score INTEGER DEFAULT 75,
+        recruiter_notes TEXT,
+        recruiter_rating INTEGER DEFAULT 0,
+        rejection_reason TEXT,
+        created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+        updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS documents (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        application_id UUID REFERENCES applications(id) ON DELETE CASCADE NOT NULL,
+        document_type VARCHAR(100) NOT NULL,
+        file_name VARCHAR(255) NOT NULL,
+        file_size INTEGER NOT NULL,
+        mime_type VARCHAR(100) NOT NULL,
+        file_data TEXT,
+        status VARCHAR(50) NOT NULL DEFAULT 'Pending',
+        automated_check_status VARCHAR(50) NOT NULL DEFAULT 'Passed',
+        automated_check_details TEXT,
+        verified_by VARCHAR(255),
+        verification_comment TEXT,
+        verified_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW() NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS application_timeline (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        application_id UUID REFERENCES applications(id) ON DELETE CASCADE NOT NULL,
+        status VARCHAR(100) NOT NULL,
+        actor_name VARCHAR(255) NOT NULL,
+        comment TEXT,
+        created_at TIMESTAMP DEFAULT NOW() NOT NULL
+      );
+    `);
+
+    // Migrate any legacy roles to the 4 standardized roles, and ensure sequence and salary negotiation columns exist
     await pool.query(`
       ALTER TABLE applications ADD COLUMN IF NOT EXISTS department VARCHAR(150);
+      ALTER TABLE applications ADD COLUMN IF NOT EXISTS seq_number INTEGER;
+      ALTER TABLE applications ADD COLUMN IF NOT EXISTS app_code VARCHAR(50);
+      ALTER TABLE applications ADD COLUMN IF NOT EXISTS expected_salary VARCHAR(100);
+      ALTER TABLE applications ADD COLUMN IF NOT EXISTS is_salary_negotiable BOOLEAN DEFAULT true;
+      ALTER TABLE applications ADD COLUMN IF NOT EXISTS salary_negotiation_preference VARCHAR(100) DEFAULT 'Negotiable';
+      ALTER TABLE applications ADD COLUMN IF NOT EXISTS current_salary VARCHAR(100);
+      ALTER TABLE applications ADD COLUMN IF NOT EXISTS notice_period VARCHAR(100) DEFAULT '1 Month';
+      ALTER TABLE applications ADD COLUMN IF NOT EXISTS years_of_experience VARCHAR(100);
+      ALTER TABLE applications ADD COLUMN IF NOT EXISTS education_level VARCHAR(150);
+      ALTER TABLE applications ADD COLUMN IF NOT EXISTS employment_status VARCHAR(100);
+
+      ALTER TABLE vacancies ADD COLUMN IF NOT EXISTS seq_number INTEGER;
+      ALTER TABLE vacancies ADD COLUMN IF NOT EXISTS job_code VARCHAR(50);
+      ALTER TABLE vacancies ADD COLUMN IF NOT EXISTS min_salary INTEGER;
+      ALTER TABLE vacancies ADD COLUMN IF NOT EXISTS max_salary INTEGER;
+      ALTER TABLE vacancies ADD COLUMN IF NOT EXISTS currency VARCHAR(20) DEFAULT 'ETB';
+      ALTER TABLE vacancies ADD COLUMN IF NOT EXISTS is_negotiable BOOLEAN DEFAULT true;
+      ALTER TABLE vacancies ADD COLUMN IF NOT EXISTS negotiation_notes TEXT;
+
       UPDATE applications a SET department = v.department FROM vacancies v WHERE a.vacancy_id = v.id AND (a.department IS NULL OR a.department = '');
       UPDATE vacancies SET deadline = NOW() + INTERVAL '30 days' WHERE deadline IS NULL;
+
+      -- Backfill sequential numbers starting from 01 for vacancies
+      WITH numbered_vacs AS (
+        SELECT id, ROW_NUMBER() OVER (ORDER BY created_at ASC) as rn
+        FROM vacancies
+      )
+      UPDATE vacancies v
+      SET seq_number = nv.rn,
+          job_code = 'VAC-' || LPAD(nv.rn::text, 2, '0'),
+          is_negotiable = COALESCE(v.is_negotiable, true),
+          currency = COALESCE(v.currency, 'ETB')
+      FROM numbered_vacs nv
+      WHERE v.id = nv.id AND (v.seq_number IS NULL OR v.job_code IS NULL);
+
+      -- Backfill sequential numbers starting from 01 for applications
+      WITH numbered_apps AS (
+        SELECT id, ROW_NUMBER() OVER (ORDER BY created_at ASC) as rn
+        FROM applications
+      )
+      UPDATE applications a
+      SET seq_number = na.rn,
+          app_code = 'APP-' || LPAD(na.rn::text, 2, '0'),
+          expected_salary = COALESCE(a.expected_salary, '60,000 ETB / month'),
+          is_salary_negotiable = COALESCE(a.is_salary_negotiable, true),
+          salary_negotiation_preference = COALESCE(a.salary_negotiation_preference, 'Negotiable'),
+          notice_period = COALESCE(a.notice_period, '2 Weeks'),
+          years_of_experience = COALESCE(a.years_of_experience, '4+ years'),
+          education_level = COALESCE(a.education_level, 'BSc Computer Science')
+      FROM numbered_apps na
+      WHERE a.id = na.id AND (a.seq_number IS NULL OR a.app_code IS NULL);
     `);
 
     console.log('Ensuring standardized demo accounts are provisioned and synchronized...');
@@ -686,7 +832,7 @@ app.post('/api/system/sync-health', authenticateToken, async (req: Authenticated
 // GET /api/vacancies (Public or authenticated)
 app.get('/api/vacancies', async (req: Request, res: Response) => {
   try {
-    const { department, search, status } = req.query;
+    const { department, search, status, includeExpired } = req.query;
     let query = `
       SELECT v.*, COUNT(a.id)::int as applicant_count
       FROM vacancies v
@@ -695,9 +841,20 @@ app.get('/api/vacancies', async (req: Request, res: Response) => {
     const conditions: string[] = [];
     const values: any[] = [];
 
-    if (status) {
-      values.push(status);
-      conditions.push(`v.status = $${values.length}`);
+    // If not requested by admin with includeExpired=true, hide closed and deadline-passed vacancies from public/candidate pages
+    if (includeExpired !== 'true') {
+      conditions.push(`v.status = 'Open' AND (v.deadline IS NULL OR v.deadline >= NOW())`);
+    } else {
+      if (status && status !== 'All') {
+        if (status === 'Expired' || status === 'closed_or_expired') {
+          conditions.push(`(v.status = 'Closed' OR (v.deadline IS NOT NULL AND v.deadline < NOW()))`);
+        } else if (status === 'Active' || status === 'open_active') {
+          conditions.push(`v.status = 'Open' AND (v.deadline IS NULL OR v.deadline >= NOW())`);
+        } else {
+          values.push(status);
+          conditions.push(`v.status = $${values.length}`);
+        }
+      }
     }
 
     if (department && department !== 'All') {
@@ -714,19 +871,27 @@ app.get('/api/vacancies', async (req: Request, res: Response) => {
       query += ` WHERE ` + conditions.join(' AND ');
     }
 
-    query += ` GROUP BY v.id ORDER BY v.created_at DESC`;
+    query += ` GROUP BY v.id ORDER BY COALESCE(v.seq_number, 999999) ASC, v.created_at ASC`;
 
     const result = await pool.query(query, values);
     
-    // Map snake_case to camelCase
+    // Map snake_case to camelCase and include sequential code & salary negotiation
     const vacancies = result.rows.map(row => ({
       id: row.id,
+      seqNumber: row.seq_number,
+      jobCode: row.job_code || `VAC-${String(row.seq_number || 1).padStart(2, '0')}`,
+      seqId: String(row.seq_number || 1).padStart(2, '0'),
       title: row.title,
       department: row.department,
       location: row.location,
       type: row.type,
       experienceLevel: row.experience_level,
       salaryRange: row.salary_range,
+      minSalary: row.min_salary,
+      maxSalary: row.max_salary,
+      currency: row.currency || 'ETB',
+      isNegotiable: row.is_negotiable !== false,
+      negotiationNotes: row.negotiation_notes,
       description: row.description,
       requirements: row.requirements,
       status: row.status,
@@ -764,12 +929,20 @@ app.get('/api/vacancies/:id', async (req: Request, res: Response) => {
     const row = result.rows[0];
     res.json({
       id: row.id,
+      seqNumber: row.seq_number,
+      jobCode: row.job_code || `VAC-${String(row.seq_number || 1).padStart(2, '0')}`,
+      seqId: String(row.seq_number || 1).padStart(2, '0'),
       title: row.title,
       department: row.department,
       location: row.location,
       type: row.type,
       experienceLevel: row.experience_level,
       salaryRange: row.salary_range,
+      minSalary: row.min_salary,
+      maxSalary: row.max_salary,
+      currency: row.currency || 'ETB',
+      isNegotiable: row.is_negotiable !== false,
+      negotiationNotes: row.negotiation_notes,
       description: row.description,
       requirements: row.requirements,
       status: row.status,
@@ -799,6 +972,11 @@ app.post('/api/vacancies', authenticateToken, async (req: AuthenticatedRequest, 
       type = 'Full-time',
       experienceLevel = 'Mid-Level',
       salaryRange,
+      minSalary,
+      maxSalary,
+      currency = 'ETB',
+      isNegotiable = true,
+      negotiationNotes,
       description,
       requirements,
       requiredDocuments = 'Resume / CV, Academic Degree',
@@ -809,27 +987,64 @@ app.post('/api/vacancies', authenticateToken, async (req: AuthenticatedRequest, 
       return res.status(400).json({ error: 'Missing mandatory vacancy details' });
     }
 
+    const maxSeqRes = await pool.query('SELECT COALESCE(MAX(seq_number), 0) as max_seq FROM vacancies');
+    const nextSeq = (parseInt(maxSeqRes.rows[0].max_seq, 10) || 0) + 1;
+    const jobCode = `VAC-${String(nextSeq).padStart(2, '0')}`;
+    const cleanIsNegotiable = isNegotiable !== undefined ? Boolean(isNegotiable) : true;
+
+    let finalSalaryRange = salaryRange;
+    if (minSalary && maxSalary) {
+      finalSalaryRange = `${Number(minSalary).toLocaleString()} - ${Number(maxSalary).toLocaleString()} ${currency || 'ETB'} / month${cleanIsNegotiable ? ' (Negotiable)' : ''}`;
+    } else if (cleanIsNegotiable && finalSalaryRange && !finalSalaryRange.toLowerCase().includes('negotiable')) {
+      finalSalaryRange = `${finalSalaryRange} (Negotiable)`;
+    }
+
     const result = await pool.query(
       `INSERT INTO vacancies (
-        title, department, location, type, experience_level, salary_range,
+        seq_number, job_code, title, department, location, type, experience_level,
+        salary_range, min_salary, max_salary, currency, is_negotiable, negotiation_notes,
         description, requirements, required_documents, deadline, created_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
       RETURNING *`,
       [
-        title, department, location, type, experienceLevel, salaryRange,
-        description, requirements, requiredDocuments, deadline || null, req.user.id
+        nextSeq,
+        jobCode,
+        title,
+        department,
+        location,
+        type,
+        experienceLevel,
+        finalSalaryRange,
+        minSalary ? parseInt(minSalary, 10) : null,
+        maxSalary ? parseInt(maxSalary, 10) : null,
+        currency || 'ETB',
+        cleanIsNegotiable,
+        negotiationNotes || null,
+        description,
+        requirements,
+        requiredDocuments,
+        deadline || null,
+        req.user.id
       ]
     );
 
     const row = result.rows[0];
     res.status(201).json({
       id: row.id,
+      seqNumber: row.seq_number,
+      jobCode: row.job_code,
+      seqId: String(row.seq_number).padStart(2, '0'),
       title: row.title,
       department: row.department,
       location: row.location,
       type: row.type,
       experienceLevel: row.experience_level,
       salaryRange: row.salary_range,
+      minSalary: row.min_salary,
+      maxSalary: row.max_salary,
+      currency: row.currency,
+      isNegotiable: row.is_negotiable,
+      negotiationNotes: row.negotiation_notes,
       description: row.description,
       requirements: row.requirements,
       status: row.status,
@@ -853,7 +1068,24 @@ const handleUpdateVacancy = async (req: AuthenticatedRequest, res: Response) => 
     }
 
     const { id } = req.params;
-    const { title, department, location, type, experienceLevel, salaryRange, description, requirements, status, requiredDocuments, deadline } = req.body;
+    const {
+      title,
+      department,
+      location,
+      type,
+      experienceLevel,
+      salaryRange,
+      minSalary,
+      maxSalary,
+      currency,
+      isNegotiable,
+      negotiationNotes,
+      description,
+      requirements,
+      status,
+      requiredDocuments,
+      deadline
+    } = req.body;
 
     const result = await pool.query(
       `UPDATE vacancies
@@ -867,8 +1099,13 @@ const handleUpdateVacancy = async (req: AuthenticatedRequest, res: Response) => 
            requirements = COALESCE($8, requirements),
            status = COALESCE($9, status),
            required_documents = COALESCE($10, required_documents),
-           deadline = COALESCE($11, deadline)
-       WHERE id = $12
+           deadline = COALESCE($11, deadline),
+           min_salary = COALESCE($12, min_salary),
+           max_salary = COALESCE($13, max_salary),
+           currency = COALESCE($14, currency),
+           is_negotiable = COALESCE($15, is_negotiable),
+           negotiation_notes = COALESCE($16, negotiation_notes)
+       WHERE id = $17
        RETURNING *`,
       [
         title ?? null,
@@ -882,6 +1119,11 @@ const handleUpdateVacancy = async (req: AuthenticatedRequest, res: Response) => 
         status ?? null,
         requiredDocuments ?? null,
         deadline ?? null,
+        minSalary ? parseInt(minSalary, 10) : null,
+        maxSalary ? parseInt(maxSalary, 10) : null,
+        currency ?? null,
+        isNegotiable !== undefined ? Boolean(isNegotiable) : null,
+        negotiationNotes ?? null,
         id
       ]
     );
@@ -890,7 +1132,31 @@ const handleUpdateVacancy = async (req: AuthenticatedRequest, res: Response) => 
       return res.status(404).json({ error: 'Vacancy not found' });
     }
 
-    res.json(result.rows[0]);
+    const row = result.rows[0];
+    res.json({
+      id: row.id,
+      seqNumber: row.seq_number,
+      jobCode: row.job_code || `VAC-${String(row.seq_number || 1).padStart(2, '0')}`,
+      seqId: String(row.seq_number || 1).padStart(2, '0'),
+      title: row.title,
+      department: row.department,
+      location: row.location,
+      type: row.type,
+      experienceLevel: row.experience_level,
+      salaryRange: row.salary_range,
+      minSalary: row.min_salary,
+      maxSalary: row.max_salary,
+      currency: row.currency,
+      isNegotiable: row.is_negotiable,
+      negotiationNotes: row.negotiation_notes,
+      description: row.description,
+      requirements: row.requirements,
+      status: row.status,
+      requiredDocuments: row.required_documents,
+      deadline: row.deadline,
+      createdAt: row.created_at,
+      createdBy: row.created_by,
+    });
   } catch (error: any) {
     console.error('Error updating vacancy:', error);
     res.status(500).json({ error: 'Failed to update vacancy' });
@@ -941,6 +1207,14 @@ app.post('/api/applications', authenticateToken, async (req: AuthenticatedReques
       applicantEmail,
       applicantPhone,
       department,
+      expectedSalary,
+      isSalaryNegotiable = true,
+      salaryNegotiationPreference = 'Negotiable',
+      currentSalary,
+      noticePeriod = '1 Month',
+      yearsOfExperience,
+      educationLevel,
+      employmentStatus,
       coverLetter,
       portfolioUrl,
       linkedinUrl,
@@ -957,13 +1231,22 @@ app.post('/api/applications', authenticateToken, async (req: AuthenticatedReques
       return res.status(400).json({ error: 'Please upload at least your Resume/CV to complete application' });
     }
 
+    // Check vacancy existence and ensure deadline has not closed
+    const vacRes = await client.query('SELECT department, status, deadline FROM vacancies WHERE id = $1', [vacancyId]);
+    if (vacRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Vacancy not found' });
+    }
+    const vacRow = vacRes.rows[0];
+    if (vacRow.status === 'Closed' || (vacRow.deadline && new Date(vacRow.deadline).getTime() < Date.now())) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'The application deadline for this position has closed. Applications are no longer accepted.' });
+    }
+
     // Determine department fallback from vacancy if not provided
     let finalDepartment = department?.trim();
     if (!finalDepartment) {
-      const vacRes = await client.query('SELECT department FROM vacancies WHERE id = $1', [vacancyId]);
-      if (vacRes.rows.length > 0) {
-        finalDepartment = vacRes.rows[0].department;
-      }
+      finalDepartment = vacRow.department;
     }
 
     // Check if candidate already applied for this vacancy
@@ -977,20 +1260,37 @@ app.post('/api/applications', authenticateToken, async (req: AuthenticatedReques
       return res.status(400).json({ error: 'You have already submitted an application for this vacancy.' });
     }
 
-    // Insert Application
+    // Next application sequence number starting from 01
+    const maxAppSeq = await client.query('SELECT COALESCE(MAX(seq_number), 0) as max_seq FROM applications');
+    const nextSeq = (parseInt(maxAppSeq.rows[0].max_seq, 10) || 0) + 1;
+    const appCode = `APP-${String(nextSeq).padStart(2, '0')}`;
+
+    // Insert Application with related fields & salary negotiations
     const appResult = await client.query(
       `INSERT INTO applications (
-        vacancy_id, applicant_id, applicant_name, applicant_email, applicant_phone,
-        department, cover_letter, portfolio_url, linkedin_url, status, verification_status, verification_score
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Submitted', 'Pending', 75)
+        seq_number, app_code, vacancy_id, applicant_id, applicant_name, applicant_email, applicant_phone,
+        department, expected_salary, is_salary_negotiable, salary_negotiation_preference,
+        current_salary, notice_period, years_of_experience, education_level, employment_status,
+        cover_letter, portfolio_url, linkedin_url, status, verification_status, verification_score
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 'Submitted', 'Pending', 75)
       RETURNING *`,
       [
+        nextSeq,
+        appCode,
         vacancyId,
         applicantId,
         applicantName,
         applicantEmail,
         applicantPhone,
         finalDepartment || 'General',
+        expectedSalary || 'Negotiable',
+        isSalaryNegotiable !== false,
+        salaryNegotiationPreference || 'Negotiable',
+        currentSalary || null,
+        noticePeriod || '1 Month',
+        yearsOfExperience || null,
+        educationLevel || null,
+        employmentStatus || null,
         coverLetter || '',
         portfolioUrl || '',
         linkedinUrl || '',
@@ -1123,18 +1423,29 @@ app.get('/api/applications', authenticateToken, async (req: AuthenticatedRequest
       query += ` WHERE ` + conditions.join(' AND ');
     }
 
-    query += ` GROUP BY a.id, v.title, v.department ORDER BY a.created_at DESC`;
+    query += ` GROUP BY a.id, v.title, v.department ORDER BY COALESCE(a.seq_number, 999999) ASC, a.created_at ASC`;
 
     const result = await pool.query(query, values);
 
     const applications = result.rows.map(row => ({
       id: row.id,
+      seqNumber: row.seq_number,
+      appCode: row.app_code || `APP-${String(row.seq_number || 1).padStart(2, '0')}`,
+      seqId: String(row.seq_number || 1).padStart(2, '0'),
       vacancyId: row.vacancy_id,
       applicantId: row.applicant_id,
       applicantName: row.applicant_name,
       applicantEmail: row.applicant_email,
       applicantPhone: row.applicant_phone,
       department: row.department || row.vacancy_department,
+      expectedSalary: row.expected_salary,
+      isSalaryNegotiable: row.is_salary_negotiable !== false,
+      salaryNegotiationPreference: row.salary_negotiation_preference || 'Negotiable',
+      currentSalary: row.current_salary,
+      noticePeriod: row.notice_period || '1 Month',
+      yearsOfExperience: row.years_of_experience,
+      educationLevel: row.education_level,
+      employmentStatus: row.employment_status,
       coverLetter: row.cover_letter,
       portfolioUrl: row.portfolio_url,
       linkedinUrl: row.linkedin_url,
@@ -1202,12 +1513,23 @@ app.get('/api/applications/:id', authenticateToken, async (req: AuthenticatedReq
 
     res.json({
       id: row.id,
+      seqNumber: row.seq_number,
+      appCode: row.app_code || `APP-${String(row.seq_number || 1).padStart(2, '0')}`,
+      seqId: String(row.seq_number || 1).padStart(2, '0'),
       vacancyId: row.vacancy_id,
       applicantId: row.applicant_id,
       applicantName: row.applicant_name,
       applicantEmail: row.applicant_email,
       applicantPhone: row.applicant_phone,
       department: row.department || row.vacancy_department,
+      expectedSalary: row.expected_salary,
+      isSalaryNegotiable: row.is_salary_negotiable !== false,
+      salaryNegotiationPreference: row.salary_negotiation_preference || 'Negotiable',
+      currentSalary: row.current_salary,
+      noticePeriod: row.notice_period || '1 Month',
+      yearsOfExperience: row.years_of_experience,
+      educationLevel: row.education_level,
+      employmentStatus: row.employment_status,
       coverLetter: row.cover_letter,
       portfolioUrl: row.portfolio_url,
       linkedinUrl: row.linkedin_url,
@@ -1358,6 +1680,11 @@ const handleUpdateFullApplication = async (req: AuthenticatedRequest, res: Respo
       coverLetter,
       portfolioUrl,
       linkedinUrl,
+      expectedSalary,
+      isSalaryNegotiable,
+      salaryNegotiationPreference,
+      noticePeriod,
+      employmentStatus,
     } = req.body;
 
     const existing = await pool.query('SELECT * FROM applications WHERE id = $1', [id]);
@@ -1381,8 +1708,13 @@ const handleUpdateFullApplication = async (req: AuthenticatedRequest, res: Respo
            cover_letter = COALESCE($11, cover_letter),
            portfolio_url = COALESCE($12, portfolio_url),
            linkedin_url = COALESCE($13, linkedin_url),
+           expected_salary = COALESCE($14, expected_salary),
+           is_salary_negotiable = COALESCE($15, is_salary_negotiable),
+           salary_negotiation_preference = COALESCE($16, salary_negotiation_preference),
+           notice_period = COALESCE($17, notice_period),
+           employment_status = COALESCE($18, employment_status),
            updated_at = NOW()
-       WHERE id = $14
+       WHERE id = $19
        RETURNING *`,
       [
         applicantName !== undefined ? applicantName.trim() : null,
@@ -1398,6 +1730,11 @@ const handleUpdateFullApplication = async (req: AuthenticatedRequest, res: Respo
         coverLetter !== undefined ? coverLetter : null,
         portfolioUrl !== undefined ? portfolioUrl : null,
         linkedinUrl !== undefined ? linkedinUrl : null,
+        expectedSalary !== undefined ? expectedSalary.trim() : null,
+        isSalaryNegotiable !== undefined ? Boolean(isSalaryNegotiable) : null,
+        salaryNegotiationPreference !== undefined ? salaryNegotiationPreference : null,
+        noticePeriod !== undefined ? noticePeriod : null,
+        employmentStatus !== undefined ? employmentStatus : null,
         id,
       ]
     );
@@ -1773,6 +2110,141 @@ app.get('/api/recruiter/metrics', authenticateToken, async (req: AuthenticatedRe
   } catch (error: any) {
     console.error('Error fetching recruiter metrics:', error);
     res.status(500).json({ error: 'Failed to retrieve metrics' });
+  }
+});
+
+// POST /api/admin/sql-query (Execute SQL queries from System Admin console)
+app.post('/api/admin/sql-query', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!isSystemAdmin(req.user?.role)) {
+      return res.status(403).json({ error: 'Permission denied: Only System Administrators can execute SQL queries' });
+    }
+
+    const { sql } = req.body;
+    if (!sql || typeof sql !== 'string' || !sql.trim()) {
+      return res.status(400).json({ error: 'SQL query string is required' });
+    }
+
+    const trimmed = sql.trim();
+    const startTime = Date.now();
+    const result = await pool.query(trimmed);
+    const executionTimeMs = Date.now() - startTime;
+
+    res.json({
+      ok: true,
+      query: trimmed,
+      rowCount: result.rowCount ?? result.rows?.length ?? 0,
+      rows: result.rows || [],
+      fields: (result.fields || []).map(f => ({ name: f.name, dataTypeID: f.dataTypeID })),
+      executionTimeMs,
+    });
+  } catch (error: any) {
+    console.error('SQL Query execution error:', error);
+    res.status(400).json({
+      ok: false,
+      error: error.message || 'SQL execution failed',
+      code: error.code,
+      detail: error.detail,
+    });
+  }
+});
+
+// GET /api/admin/supabase-migration-sql (Export full Supabase Migration SQL)
+app.get('/api/admin/supabase-migration-sql', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!isSystemAdmin(req.user?.role)) {
+      return res.status(403).json({ error: 'Permission denied: Only System Administrators can export SQL migrations' });
+    }
+
+    const migrationFilePath = path.resolve('supabase_migration.sql');
+    let sqlContent = '';
+    if (fs.existsSync(migrationFilePath)) {
+      sqlContent = fs.readFileSync(migrationFilePath, 'utf8');
+    } else {
+      sqlContent = `-- Supabase Migration Script\n-- File not found on disk, please contact system admin.`;
+    }
+
+    res.json({
+      ok: true,
+      filename: 'supabase_migration.sql',
+      sql: sqlContent,
+    });
+  } catch (error: any) {
+    console.error('Error serving Supabase migration SQL:', error);
+    res.status(500).json({ error: 'Failed to retrieve Supabase migration script' });
+  }
+});
+
+// POST /api/admin/test-database-connection (Test live Supabase connection URI)
+app.post('/api/admin/test-database-connection', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!isSystemAdmin(req.user?.role)) {
+      return res.status(403).json({ error: 'Permission denied: System Administrator required' });
+    }
+
+    const { connectionString } = req.body;
+    if (!connectionString || typeof connectionString !== 'string' || !connectionString.trim()) {
+      return res.status(400).json({ ok: false, error: 'Connection string is required' });
+    }
+
+    const trimmed = connectionString.trim();
+    if (!trimmed.startsWith('postgres://') && !trimmed.startsWith('postgresql://')) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid connection string format. It must start with postgresql:// or postgres://',
+      });
+    }
+
+    // Attempt short connection test with 6 second timeout
+    const testPool = new pg.Pool({
+      connectionString: trimmed,
+      ssl: { rejectUnauthorized: false },
+      connectionTimeoutMillis: 6000,
+      idleTimeoutMillis: 1000,
+    });
+
+    const startTime = Date.now();
+    const client = await testPool.connect();
+    try {
+      const verRes = await client.query('SELECT current_database() as db, current_user as usr, version() as ver;');
+      const tableRes = await client.query(`
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+        ORDER BY table_name;
+      `);
+      const executionTimeMs = Date.now() - startTime;
+
+      client.release();
+      await testPool.end();
+
+      const tables = tableRes.rows.map(r => r.table_name);
+      const isConfiguredForTalentFlow = tables.includes('vacancies') && tables.includes('applications') && tables.includes('users');
+
+      res.json({
+        ok: true,
+        database: verRes.rows[0]?.db,
+        user: verRes.rows[0]?.usr,
+        version: verRes.rows[0]?.ver,
+        tables,
+        isConfiguredForTalentFlow,
+        executionTimeMs,
+        message: isConfiguredForTalentFlow
+          ? 'Successfully connected to Supabase! All TalentFlow tables are detected and ready.'
+          : 'Successfully connected to database! Note: TalentFlow tables are not yet created in this database. Run the Supabase SQL migration script in SQL Editor to set them up.',
+      });
+    } catch (queryErr: any) {
+      client.release();
+      await testPool.end();
+      throw queryErr;
+    }
+  } catch (error: any) {
+    console.error('Database connection test error:', error);
+    res.status(400).json({
+      ok: false,
+      error: error.message || 'Failed to connect to database',
+      code: error.code,
+    });
   }
 });
 

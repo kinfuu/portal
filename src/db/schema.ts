@@ -12,12 +12,19 @@ export const users = pgTable('users', {
 
 export const vacancies = pgTable('vacancies', {
   id: uuid('id').defaultRandom().primaryKey(),
+  seqNumber: integer('seq_number'), // 1, 2, 3...
+  jobCode: varchar('job_code', { length: 50 }), // 'VAC-01', 'VAC-02'...
   title: varchar('title', { length: 255 }).notNull(),
   department: varchar('department', { length: 150 }).notNull(),
   location: varchar('location', { length: 150 }).notNull(),
   type: varchar('type', { length: 50 }).notNull().default('Full-time'), // 'Full-time' | 'Part-time' | 'Remote' | 'Contract'
   experienceLevel: varchar('experience_level', { length: 50 }).notNull().default('Mid-Level'),
   salaryRange: varchar('salary_range', { length: 100 }),
+  minSalary: integer('min_salary'),
+  maxSalary: integer('max_salary'),
+  currency: varchar('currency', { length: 20 }).default('ETB'),
+  isNegotiable: boolean('is_negotiable').default(true),
+  negotiationNotes: text('negotiation_notes'),
   description: text('description').notNull(),
   requirements: text('requirements').notNull(), // JSON or newline separated text
   status: varchar('status', { length: 50 }).notNull().default('Open'), // 'Open' | 'Closed' | 'Draft'
@@ -29,12 +36,25 @@ export const vacancies = pgTable('vacancies', {
 
 export const applications = pgTable('applications', {
   id: uuid('id').defaultRandom().primaryKey(),
+  seqNumber: integer('seq_number'), // 1, 2, 3...
+  appCode: varchar('app_code', { length: 50 }), // 'APP-01', 'APP-02'...
   vacancyId: uuid('vacancy_id').references(() => vacancies.id).notNull(),
   applicantId: uuid('applicant_id').references(() => users.id).notNull(),
   applicantName: varchar('applicant_name', { length: 255 }).notNull(),
   applicantEmail: varchar('applicant_email', { length: 255 }).notNull(),
   applicantPhone: varchar('applicant_phone', { length: 50 }).notNull(),
   department: varchar('department', { length: 150 }),
+  
+  // Related application fields & salary negotiations
+  expectedSalary: varchar('expected_salary', { length: 100 }),
+  isSalaryNegotiable: boolean('is_salary_negotiable').default(true),
+  salaryNegotiationPreference: varchar('salary_negotiation_preference', { length: 100 }).default('Negotiable'),
+  currentSalary: varchar('current_salary', { length: 100 }),
+  noticePeriod: varchar('notice_period', { length: 100 }).default('1 Month'),
+  yearsOfExperience: varchar('years_of_experience', { length: 100 }),
+  educationLevel: varchar('education_level', { length: 150 }),
+  employmentStatus: varchar('employment_status', { length: 100 }),
+  
   coverLetter: text('cover_letter'),
   portfolioUrl: varchar('portfolio_url', { length: 500 }),
   linkedinUrl: varchar('linkedin_url', { length: 500 }),
